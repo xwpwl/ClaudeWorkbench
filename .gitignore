@@ -1,0 +1,50 @@
+# Local agent and editor state
+/.claude/
+/.superpowers/
+/.vscode/
+/.idea/
+
+# Dependencies and generated build output
+/node_modules/
+/dist/
+/out/
+/build/
+/output/
+/release/
+/release-validation/
+/workbench-runtime/
+/coverage/
+/.vite/
+/.cache/
+/playwright-report/
+/test-results/
+/logs/
+/tmp/
+
+# Local runtime data and diagnostics
+/data/
+/user-data/
+/electron-data/
+/diagnostics/
+/*.db
+/*.db-wal
+/*.db-shm
+/*.sqlite
+/*.sqlite-wal
+/*.sqlite-shm
+/*.log
+
+# Local secrets and signing material
+/.env
+/.env.*
+!/.env.example
+/*.pem
+/*.key
+/*.pfx
+/*.p12
+
+# OS and editor temporary files
+Thumbs.db
+Desktop.ini
+*.swp
+*~

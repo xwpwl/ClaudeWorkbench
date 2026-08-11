@@ -1,0 +1,21 @@
+# Normalize repository text to LF across platforms.
+* text=auto eol=lf
+
+# Windows command scripts retain CRLF where it is conventional.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Generated and media assets are binary.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.webp binary
+*.gif binary
+*.zip binary
+*.exe binary
+*.dll binary
+*.pdf binary
+*.db binary
+*.sqlite binary

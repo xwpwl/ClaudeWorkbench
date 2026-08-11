@@ -1,0 +1,48 @@
+appId: com.claudeworkbench.app
+productName: Claude Workbench
+directories:
+  output: release
+  buildResources: build
+# Reuse the Electron distribution installed from the lockfile. This keeps
+# Windows packaging deterministic and avoids a second GitHub download during
+# air-gapped or rate-limited release builds.
+electronDist: node_modules/electron/dist
+files:
+  - dist/**/*
+  - package.json
+asar: true
+asarUnpack:
+  # Native SQLite bindings and the Claude SDK executable must remain executable.
+  - node_modules/better-sqlite3/**/*
+  - node_modules/@anthropic-ai/claude-agent-sdk-*/**/*
+# better-sqlite3 13 ships an ABI-stable prebuild that is exercised under both
+# the host Node runtime and the bundled Electron runtime in release validation.
+# @electron/rebuild otherwise discards that working binary and requires a
+# local Visual Studio toolchain before NSIS packaging can start.
+npmRebuild: false
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: build/icon.ico
+  requestedExecutionLevel: asInvoker
+  # Authenticode is picked up from electron-builder's CSC_LINK/CSC_KEY_PASSWORD
+  # environment variables. forceCodeSigning stays false for local unsigned RC
+  # validation and must be enabled by the signed release CI job.
+  forceCodeSigning: false
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  installerHeaderIcon: build/icon.ico
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Claude Workbench
+  artifactName: ClaudeWorkbench Setup ${version}.${ext}
+
+# Release CI must add an approved `publish` provider before enabling updates.
+# File associations are intentionally omitted until product ownership approves
+# the extension/protocol contract; no broad association is claimed by default.
