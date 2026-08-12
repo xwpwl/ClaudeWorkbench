@@ -1,58 +1,142 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import type {
+  ReleaseMetadata,
+  ReleaseRuntimeStatus,
+  RuntimeMetadata,
+} from '../../../shared/types/release';
 import { buildVersionInfo } from '../VersionInfo';
 
+const metadata: ReleaseMetadata = {
+  metadataSchemaVersion: 1,
+  purpose: 'candidate',
+  productName: 'Claude Workbench',
+  appId: 'com.claudeworkbench.app',
+  version: '1.0.1-rc.1',
+  channel: 'rc',
+  buildId: '1.0.1-rc.1+0123456789ab.20260812T123456Z',
+  branch: 'task15',
+  commitSha: '0123456789abcdef0123456789abcdef01234567',
+  commitShort: '0123456789ab',
+  dirty: false,
+  buildTimeUtc: '2026-08-12T12:34:56Z',
+  nodeVersion: 'v24.15.0',
+  npmVersion: '11.12.1',
+  electronVersion: '35.7.5',
+  sqliteSchemaVersion: 7,
+  platform: 'win32',
+  arch: 'x64',
+  lockfileSha256: 'a'.repeat(64),
+  releaseNotesSha256: 'b'.repeat(64),
+};
+
+const runtimeStatus: ReleaseRuntimeStatus = {
+  packaged: true,
+  signatureStatus: 'UnknownError',
+  productionFeedConfigured: false,
+  licenseStatus: 'decision_required',
+  privacyStatus: 'draft',
+};
+
+const savedEnvironment = {
+  buildId: process.env.WORKBENCH_BUILD_ID,
+  commit: process.env.WORKBENCH_COMMIT,
+  channel: process.env.WORKBENCH_RELEASE_CHANNEL,
+};
+
+afterEach(() => {
+  for (const [key, value] of Object.entries({
+    WORKBENCH_BUILD_ID: savedEnvironment.buildId,
+    WORKBENCH_COMMIT: savedEnvironment.commit,
+    WORKBENCH_RELEASE_CHANNEL: savedEnvironment.channel,
+  })) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
+
 describe('buildVersionInfo', () => {
-  it('returns the release version and safe CI metadata', () => {
+  it('projects immutable release metadata and conservative runtime status', () => {
     expect(buildVersionInfo({
-      version: '1.0.0', electronVersion: '35.6.0', packaged: true,
-      nodeVersion: '24.1.0', sqliteSchemaVersion: 7,
-      agentRuntime: 'claude-code',
-      environment: {
-        WORKBENCH_BUILD_ID: 'win-x64-1042',
-        WORKBENCH_COMMIT: '0123456789abcdef',
-        WORKBENCH_RELEASE_CHANNEL: 'stable',
-      },
+      runtimeMetadata: { mode: 'release', metadata },
+      runtimeStatus,
+      runtimeVersions: { electron: '35.7.5', node: '24.15.0' },
+      sqliteSchemaVersion: 7,
     })).toEqual({
-      version: '1.0.0', buildId: 'win-x64-1042', commit: '0123456789abcdef',
-      channel: 'stable', electronVersion: '35.6.0', nodeVersion: '24.1.0',
-      sqliteSchemaVersion: 7, agentRuntime: 'claude-code', packaged: true,
+      version: '1.0.1-rc.1',
+      channel: 'rc',
+      buildId: metadata.buildId,
+      commit: metadata.commitShort,
+      electronVersion: '35.7.5',
+      nodeVersion: 'v24.15.0',
+      sqliteSchemaVersion: 7,
+      agentRuntime: 'claude-code',
+      packaged: true,
+      signatureStatus: 'UnknownError',
+      productionFeedConfigured: false,
+      licenseStatus: 'decision_required',
+      privacyStatus: 'draft',
+      releaseNotesSha256: 'b'.repeat(64),
     });
   });
 
   it('does not expose the private data directory in diagnostic version metadata', () => {
-    const input = {
-      version: '1.0.0', packaged: true, environment: {},
+    const info = buildVersionInfo({
+      runtimeMetadata: { mode: 'release', metadata },
+      runtimeStatus,
+      runtimeVersions: { electron: '35.7.5', node: '24.15.0' },
+      sqliteSchemaVersion: 7,
       dataDirectory: 'C:\\private\\WorkbenchData',
-    };
-    const info = buildVersionInfo(input);
+    });
 
     expect(info).not.toHaveProperty('dataDirectory');
     expect(JSON.stringify(info)).not.toContain('WorkbenchData');
   });
 
-  it('uses deterministic packaged fallbacks when CI metadata is absent', () => {
-    expect(buildVersionInfo({ version: '1.0.0', packaged: true, environment: {} }))
-      .toMatchObject({ buildId: 'release-1.0.0', commit: 'unknown', channel: 'stable' });
+  it('labels unpackaged development builds without inventing release provenance', () => {
+    const runtimeMetadata: RuntimeMetadata = {
+      mode: 'development',
+      version: '1.0.1-rc.1',
+      commit: 'unknown',
+      channel: 'dev',
+      dirty: true,
+    };
+    expect(buildVersionInfo({
+      runtimeMetadata,
+      runtimeStatus: { ...runtimeStatus, packaged: false },
+      runtimeVersions: { electron: '35.7.5', node: '24.15.0' },
+      sqliteSchemaVersion: 7,
+    })).toEqual({
+      version: '1.0.1-rc.1',
+      channel: 'dev',
+      buildId: 'development',
+      commit: 'unknown',
+      electronVersion: '35.7.5',
+      nodeVersion: '24.15.0',
+      sqliteSchemaVersion: 7,
+      agentRuntime: 'claude-code',
+      packaged: false,
+      signatureStatus: 'UnknownError',
+      productionFeedConfigured: false,
+      licenseStatus: 'decision_required',
+      privacyStatus: 'draft',
+      releaseNotesSha256: '',
+    });
   });
 
-  it('labels unpackaged development builds', () => {
-    expect(buildVersionInfo({ version: '1.0.0', packaged: false, environment: {} }).buildId)
-      .toBe('development');
-  });
+  it('never reads or exposes legacy WORKBENCH environment metadata', () => {
+    process.env.WORKBENCH_BUILD_ID = 'secret-value';
+    process.env.WORKBENCH_COMMIT = 'fedcba9876543210';
+    process.env.WORKBENCH_RELEASE_CHANNEL = 'latest';
 
-  it('never exposes arbitrary environment values', () => {
     const info = buildVersionInfo({
-      version: 'bad version', packaged: true,
-      environment: {
-        WORKBENCH_BUILD_ID: 'build\nsecret',
-        WORKBENCH_COMMIT: 'not-a-commit',
-        WORKBENCH_RELEASE_CHANNEL: 'stable;token=secret',
-        ANTHROPIC_API_KEY: 'do-not-copy',
-      },
+      runtimeMetadata: { mode: 'release', metadata },
+      runtimeStatus,
+      runtimeVersions: { electron: '35.7.5', node: '24.15.0' },
+      sqliteSchemaVersion: 7,
     });
-    expect(info).toMatchObject({
-      version: '0.0.0', buildId: 'release-0.0.0', commit: 'unknown', channel: 'stable',
-    });
-    expect(JSON.stringify(info)).not.toContain('do-not-copy');
+    expect(info.buildId).toBe(metadata.buildId);
+    expect(info.commit).toBe(metadata.commitShort);
+    expect(info.channel).toBe('rc');
+    expect(JSON.stringify(info)).not.toContain('secret-value');
   });
 });

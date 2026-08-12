@@ -1,4 +1,5 @@
 import type { IpcMain } from 'electron';
+import type { ReleaseVersionInfo } from '../../src/shared/types/ipc';
 import { registerClaudeIPC } from '../../src/main/ipc/claude';
 import { registerDiagnosticsExportIPC } from '../../src/main/ipc/diagnostics';
 import { registerFileChangesIPC } from '../../src/main/ipc/file-changes';
@@ -17,6 +18,7 @@ import { registerTaskIPC } from '../../src/main/ipc/tasks';
 import { registerTerminalIPC } from '../../src/main/ipc/terminal';
 import { registerWorkflowIPC } from '../../src/main/ipc/workflows';
 import type { PublicIpcRegistrar } from '../../src/main/ipc/public-invoke-boundary';
+import type { TrustedRendererIPCDependencies } from '../../src/main/ipc/trusted-frame';
 
 type AssertTrue<Value extends true> = Value;
 type AssertFalse<Value extends false> = Value;
@@ -43,6 +45,13 @@ type PermissionsExact = AssertTrue<RegistrarIsExact<typeof registerPermissionIPC
 type ProjectsExact = AssertTrue<RegistrarIsExact<typeof registerProjectIPC>>;
 type RecoveryExact = AssertTrue<RegistrarIsExact<typeof registerRecoveryIPC>>;
 type ReleaseExact = AssertTrue<RegistrarIsExact<typeof registerReleaseIPC>>;
+type ReleaseDependencies = Parameters<typeof registerReleaseIPC>[1];
+type ReleaseTrustRequired = AssertTrue<
+  ReleaseDependencies extends TrustedRendererIPCDependencies ? true : false
+>;
+type ReleaseProjectionExact = AssertTrue<
+  IsExact<Awaited<ReturnType<ReleaseDependencies['getVersionInfo']>>, ReleaseVersionInfo>
+>;
 type SessionsExact = AssertTrue<RegistrarIsExact<typeof registerSessionIPC>>;
 type SettingsExact = AssertTrue<RegistrarIsExact<typeof registerSettingsIPC>>;
 type SystemExact = AssertTrue<RegistrarIsExact<typeof registerSystemIPC>>;
@@ -63,6 +72,8 @@ export type PublicIpcRegistrarTypeGate = [
   ProjectsExact,
   RecoveryExact,
   ReleaseExact,
+  ReleaseTrustRequired,
+  ReleaseProjectionExact,
   SessionsExact,
   SettingsExact,
   SystemExact,

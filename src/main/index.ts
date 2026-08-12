@@ -41,6 +41,7 @@ import { CheckpointLifecycleCoordinator, CheckpointManager } from './checkpoints
 import { GitWorkspaceError } from './git/GitWorkspaceService';
 import type { ClaudeAdapter } from '../shared/types/claude';
 import { IPC_CHANNELS } from '../shared/types/ipc';
+import releaseContract from '../shared/release-contract.json';
 import { AgentWorkflowManager } from './workflows/AgentWorkflowManager';
 import { TaskManagerAgentStageRunner } from './workflows/TaskManagerAgentStageRunner';
 import {
@@ -54,9 +55,16 @@ import { DiagnosticsExporter } from './diagnostics/DiagnosticsExporter';
 import { CrashRecoveryManager, type RecoveryReport } from './recovery/CrashRecoveryManager';
 import { ProcessSupervisor } from './processes/ProcessSupervisor';
 import { DatabaseProcessJournal } from './processes/DatabaseProcessJournal';
+import { loadRuntimeMetadata } from './release/ReleaseMetadata';
 import { buildVersionInfo } from './release/VersionInfo';
+import { resolveAppIconPath } from './release/AppIcon';
 import {
-  detectPackagedUpdateSource,
+  bootstrapConfiguresUpdateSource,
+  loadUpdateBootstrapConfig,
+  prepareUpdaterCacheRoot,
+  resolveElectronUpdaterBaseCachePath,
+} from './release/UpdateBootstrapConfig';
+import {
   UpdateManager,
   type UpdateClient,
 } from './release/UpdateManager';
@@ -213,6 +221,11 @@ function installMenu(): void {
 function createWindow(): void {
   installMenu();
   mainWindow = new BrowserWindow({
+    icon: resolveAppIconPath({
+      packaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      appPath: app.getAppPath(),
+    }),
     width: 1400,
     height: 900,
     minWidth: 800,
@@ -247,6 +260,18 @@ function createWindow(): void {
 }
 
 async function initializeServices(): Promise<void> {
+  const runtimeMetadata = loadRuntimeMetadata({
+    packaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    fallbackVersion: app.getVersion(),
+    runtimeVersions: {
+      electron: process.versions.electron,
+      node: process.versions.node,
+      platform: process.platform,
+      arch: process.arch,
+    },
+    sqliteSchemaVersion: releaseContract.sqliteSchemaVersion,
+  });
   const publicIpcMain = createPublicIpcMain(ipcMain);
   const dataRoot = process.env.WORKBENCH_DATA_DIR
     ? path.resolve(process.env.WORKBENCH_DATA_DIR)
@@ -257,13 +282,25 @@ async function initializeServices(): Promise<void> {
   await db.ready();
   if (!db.getSetting('dataPath')) db.setSetting('dataPath', dataRoot);
 
+  const sqliteSchemaVersion = db.getDiagnosticsSummary().schemaVersion;
+  if (sqliteSchemaVersion !== releaseContract.sqliteSchemaVersion) {
+    throw new Error('Runtime SQLite schema does not match the release contract.');
+  }
   const releaseVersion = buildVersionInfo({
-    version: app.getVersion(),
-    electronVersion: process.versions.electron,
-    nodeVersion: process.versions.node,
-    sqliteSchemaVersion: db.getDiagnosticsSummary().schemaVersion,
+    runtimeMetadata,
+    runtimeStatus: {
+      packaged: app.isPackaged,
+      signatureStatus: 'UnknownError',
+      productionFeedConfigured: false,
+      licenseStatus: 'decision_required',
+      privacyStatus: 'draft',
+    },
+    runtimeVersions: {
+      electron: process.versions.electron,
+      node: process.versions.node,
+    },
+    sqliteSchemaVersion,
     agentRuntime: 'claude-code',
-    packaged: app.isPackaged,
   });
   let recoveryReport: RecoveryReport;
   crashRecovery = new CrashRecoveryManager(db, {
@@ -705,13 +742,27 @@ async function initializeServices(): Promise<void> {
     },
   );
 
+  const updateBootstrapConfig = loadUpdateBootstrapConfig({
+    packaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+  });
   const updateManager = new UpdateManager(autoUpdater as unknown as UpdateClient, {
     isPackaged: app.isPackaged,
-    sourceConfigured: detectPackagedUpdateSource(path.join(process.resourcesPath, 'app-update.yml')),
+    sourceConfigured: bootstrapConfiguresUpdateSource(updateBootstrapConfig),
+    prepareDownloadCache: () => prepareUpdaterCacheRoot(
+      resolveElectronUpdaterBaseCachePath({
+        platform: process.platform,
+        localAppData: process.env.LOCALAPPDATA,
+        xdgCacheHome: process.env.XDG_CACHE_HOME,
+        homeDirectory: os.homedir(),
+      }),
+      updateBootstrapConfig,
+    ),
   });
   unsubscribeReleaseIPC = registerReleaseIPC(publicIpcMain, {
     getVersionInfo: () => releaseVersion,
     updates: updateManager,
+    ...trustedRenderer,
   });
   unsubscribeRecoveryIPC = registerRecoveryIPC(publicIpcMain, {
     manager: crashRecovery,

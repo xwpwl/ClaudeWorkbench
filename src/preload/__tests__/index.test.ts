@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ClaudeWorkbenchAPI, ClaudeWorkbenchIpcTransport } from '../../shared/types/ipc';
+import type {
+  ClaudeWorkbenchAPI,
+  ClaudeWorkbenchIpcTransport,
+  ReleaseVersionInfo,
+} from '../../shared/types/ipc';
 import { IPC_CHANNELS } from '../../shared/types/ipc';
 import type { PermissionSettlement } from '../../shared/types/permissionBroker';
 import type { ModelProviderChangedEvent } from '../../shared/types/ipc';
@@ -236,6 +240,56 @@ describe('preload diagnostics API', () => {
     expect(api).not.toHaveProperty('invoke');
     expect(api).not.toHaveProperty('exportDiagnosticsWithAggregate');
     expect(api).not.toHaveProperty('getAnonymousPerformanceData');
+  });
+});
+
+describe('preload release API', () => {
+  it('returns the complete public release projection and sends empty action tuples', async () => {
+    const releaseVersion: ReleaseVersionInfo = {
+      version: '1.0.1-rc.1',
+      channel: 'rc',
+      buildId: '1.0.1-rc.1+0123456789ab.20260813T000000Z',
+      commit: '0123456789abcdef0123456789abcdef01234567',
+      electronVersion: '35.6.0',
+      nodeVersion: '22.14.0',
+      sqliteSchemaVersion: 7,
+      agentRuntime: 'claude-code',
+      packaged: true,
+      signatureStatus: 'NotSigned',
+      productionFeedConfigured: false,
+      licenseStatus: 'decision_required',
+      privacyStatus: 'draft',
+      releaseNotesSha256: 'a'.repeat(64),
+    };
+    electronMocks.invoke
+      .mockResolvedValueOnce({ schemaVersion: 1, ok: true, value: releaseVersion })
+      .mockResolvedValue({ schemaVersion: 1, ok: true, value: undefined });
+    const api = exposedApi();
+
+    await expect(api.getReleaseVersion()).resolves.toStrictEqual(releaseVersion);
+    await api.getUpdateState();
+    await api.checkForUpdates();
+    await api.downloadUpdate();
+
+    expect(electronMocks.invoke.mock.calls).toStrictEqual([
+      [IPC_CHANNELS.RELEASE_GET_VERSION],
+      [IPC_CHANNELS.RELEASE_GET_UPDATE_STATE],
+      [IPC_CHANNELS.RELEASE_CHECK_UPDATE],
+      [IPC_CHANNELS.RELEASE_DOWNLOAD_UPDATE],
+    ]);
+  });
+
+  it('settles false locally and sends only the literal true install intent', async () => {
+    const api = exposedApi();
+
+    await expect(api.installUpdate(false)).resolves.toBe(false);
+    expect(electronMocks.invoke).not.toHaveBeenCalled();
+
+    electronMocks.invoke.mockResolvedValueOnce({ schemaVersion: 1, ok: true, value: true });
+    await expect(api.installUpdate(true)).resolves.toBe(true);
+    expect(electronMocks.invoke.mock.calls).toStrictEqual([
+      [IPC_CHANNELS.RELEASE_INSTALL_UPDATE, { confirmed: true }],
+    ]);
   });
 });
 

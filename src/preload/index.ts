@@ -696,8 +696,9 @@ const api: ClaudeWorkbenchAPI = {
   getUpdateState: () => ipcRenderer.invoke(IPC_CHANNELS.RELEASE_GET_UPDATE_STATE),
   checkForUpdates: () => ipcRenderer.invoke(IPC_CHANNELS.RELEASE_CHECK_UPDATE),
   downloadUpdate: () => ipcRenderer.invoke(IPC_CHANNELS.RELEASE_DOWNLOAD_UPDATE),
-  installUpdate: (confirmed: boolean) =>
-    ipcRenderer.invoke(IPC_CHANNELS.RELEASE_INSTALL_UPDATE, confirmed),
+  installUpdate: (confirmed: boolean) => confirmed
+    ? ipcRenderer.invoke(IPC_CHANNELS.RELEASE_INSTALL_UPDATE, { confirmed: true })
+    : Promise.resolve(false),
 
   // System
   checkEnvironment: (): Promise<EnvironmentCheckResult> =>

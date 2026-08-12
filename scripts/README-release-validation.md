@@ -138,7 +138,20 @@ signed or GUI-tested build.
 
 ## 7. Windows installer acceptance
 
-After `npm run dist:win` creates the final artifact:
+`npm run dist` and `npm run dist:win` are developer diagnostic packaging
+commands. Both inherit the tracked electron-builder output directory,
+`release-validation/staging/build-output`; neither command creates
+authoritative release evidence merely by succeeding.
+
+The later Artifact Integrity Task 2D build report and its bound inventory are
+the only authoritative source of release-candidate installer bytes. The
+ignored `release/` directory is legacy, non-authoritative storage: release
+tooling does not select artifacts from it and does not clean it.
+
+The current installer-acceptance harness has not yet been migrated away from
+its legacy reconstructed path. Until a later task binds it to authoritative
+build inventory, do not run the harness as release evidence for staged output.
+Its current standalone diagnostic entry point is:
 
 ```powershell
 npm run test:installer:win -- --report release-validation/windows-installer.json

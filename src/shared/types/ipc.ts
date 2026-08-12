@@ -18,6 +18,8 @@ import type {
 } from './session';
 import type { DiffResult, FileChange } from './fileChanges';
 export type { DiffResult } from './fileChanges';
+import type { ReleaseVersionInfo } from './release';
+export type { ReleaseVersionInfo } from './release';
 import type { DiffOptions, FileDiff, GitStatus, CommitPreview } from './git';
 import type {
   AcceptChangesResult,
@@ -807,18 +809,6 @@ export const FIRST_RUN_RESUME_STEPS = [
 ] as const;
 
 export type FirstRunResumeStep = (typeof FIRST_RUN_RESUME_STEPS)[number];
-
-export interface ReleaseVersionInfo {
-  version: string;
-  buildId: string;
-  commit: string;
-  channel: string;
-  electronVersion: string;
-  nodeVersion: string;
-  sqliteSchemaVersion: number;
-  agentRuntime: 'claude-code';
-  packaged: boolean;
-}
 
 export type UpdateStatus =
   | 'idle'

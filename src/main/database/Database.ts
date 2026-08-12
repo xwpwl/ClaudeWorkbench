@@ -3,6 +3,7 @@ import path from 'node:path';
 import BetterSqlite3 from 'better-sqlite3';
 import type { PermissionCapability, PermissionRisk } from '../../shared/types/permissionBroker';
 import type { PageResult } from '../../shared/types/workbench';
+import releaseContract from '../../shared/release-contract.json';
 import {
   AGENT_RUNTIME_TYPES,
   MODEL_SELECTION_SOURCES,
@@ -450,7 +451,7 @@ export interface TaskModelOverrideDatabaseRow {
   updated_at: number;
 }
 
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = releaseContract.sqliteSchemaVersion;
 const DEFAULT_PAGE_LIMIT = 10_000;
 const MAX_PAGE_LIMIT = 10_000;
 const DEFAULT_WORKFLOW_PAGE_LIMIT = 50;

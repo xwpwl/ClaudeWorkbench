@@ -1,51 +1,59 @@
-import type { ReleaseVersionInfo } from '../../shared/types/ipc';
+import type {
+  ReleaseRuntimeStatus,
+  ReleaseVersionInfo,
+  RuntimeMetadata,
+} from '../../shared/types/release';
+import { publicReleaseVersionInfo } from './ReleaseMetadata';
 
 export interface VersionInfoInput {
-  version: string;
-  electronVersion?: string | null;
-  nodeVersion?: string | null;
-  sqliteSchemaVersion?: number;
+  runtimeMetadata: RuntimeMetadata;
+  runtimeStatus: ReleaseRuntimeStatus;
+  runtimeVersions: Readonly<{
+    electron: string | null | undefined;
+    node: string | null | undefined;
+  }>;
+  sqliteSchemaVersion: number;
   agentRuntime?: 'claude-code';
-  packaged: boolean;
-  environment?: Readonly<Record<string, string | undefined>>;
 }
 
-const SAFE_BUILD_VALUE = /^[a-zA-Z0-9._+-]{1,128}$/;
-const SAFE_COMMIT = /^[a-fA-F0-9]{7,64}$/;
-const SAFE_CHANNEL = /^[a-zA-Z0-9._-]{1,32}$/;
+const SAFE_VERSION = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,127}$/u;
 
-function safeValue(
-  value: string | undefined,
-  pattern: RegExp,
-  fallback: string,
-): string {
-  const trimmed = value?.trim();
-  return trimmed && pattern.test(trimmed) ? trimmed : fallback;
+function safeVersion(value: string | null | undefined): string {
+  return value && SAFE_VERSION.test(value) ? value : 'unknown';
 }
 
 /**
- * Builds public release metadata without exposing arbitrary environment values.
- * Release CI may inject only the three WORKBENCH_* values below.
+ * Compatibility projection used by existing release IPC consumers.
+ * Immutable release provenance comes only from the compiled metadata snapshot.
  */
 export function buildVersionInfo(input: VersionInfoInput): ReleaseVersionInfo {
-  const environment = input.environment ?? process.env;
-  const version = safeValue(input.version, SAFE_BUILD_VALUE, '0.0.0');
+  if (input.runtimeMetadata.mode !== 'development') {
+    if (!input.runtimeStatus.packaged) {
+      throw new Error('Packaged release metadata requires packaged runtime status.');
+    }
+    return publicReleaseVersionInfo(input.runtimeMetadata.metadata, input.runtimeStatus);
+  }
+  if (input.runtimeStatus.packaged) {
+    throw new Error('Development metadata cannot represent a packaged application.');
+  }
 
   return {
-    version,
-    buildId: safeValue(
-      environment.WORKBENCH_BUILD_ID,
-      SAFE_BUILD_VALUE,
-      input.packaged ? `release-${version}` : 'development',
-    ),
-    commit: safeValue(environment.WORKBENCH_COMMIT, SAFE_COMMIT, 'unknown'),
-    channel: safeValue(environment.WORKBENCH_RELEASE_CHANNEL, SAFE_CHANNEL, 'stable'),
-    electronVersion: safeValue(input.electronVersion ?? undefined, SAFE_BUILD_VALUE, 'unknown'),
-    nodeVersion: safeValue(input.nodeVersion ?? undefined, SAFE_BUILD_VALUE, 'unknown'),
-    sqliteSchemaVersion: Number.isSafeInteger(input.sqliteSchemaVersion) && (input.sqliteSchemaVersion ?? -1) >= 0
-      ? input.sqliteSchemaVersion!
+    version: input.runtimeMetadata.version,
+    channel: 'dev',
+    buildId: 'development',
+    commit: 'unknown',
+    electronVersion: safeVersion(input.runtimeVersions.electron),
+    nodeVersion: safeVersion(input.runtimeVersions.node),
+    sqliteSchemaVersion: Number.isSafeInteger(input.sqliteSchemaVersion)
+      && input.sqliteSchemaVersion >= 0
+      ? input.sqliteSchemaVersion
       : 0,
     agentRuntime: input.agentRuntime ?? 'claude-code',
-    packaged: input.packaged,
+    packaged: false,
+    signatureStatus: input.runtimeStatus.signatureStatus,
+    productionFeedConfigured: input.runtimeStatus.productionFeedConfigured,
+    licenseStatus: input.runtimeStatus.licenseStatus,
+    privacyStatus: input.runtimeStatus.privacyStatus,
+    releaseNotesSha256: '',
   };
 }
