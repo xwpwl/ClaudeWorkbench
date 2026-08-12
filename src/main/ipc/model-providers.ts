@@ -432,6 +432,8 @@ const taskSwitchOptionOutput = z.object({
   modelId: idInput,
   modelDisplayName: controlFree(256).nullable(),
   runtimeType: z.literal('claude-code'),
+  purpose: z.literal('task_agent_override').default('task_agent_override'),
+  source: z.literal('configured_provider').default('configured_provider'),
 });
 
 const MODEL_SWITCH_WARNING = '模型改变只影响后续 Agent 调用。';

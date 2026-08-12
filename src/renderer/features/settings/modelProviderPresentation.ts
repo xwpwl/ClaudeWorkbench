@@ -1,6 +1,7 @@
 import {
   type AgentRuntimeType,
   type ModelProviderType,
+  type ModelPolicyAgentType,
   type ProviderCapabilities,
   type ProviderConnectionErrorType,
   type ProviderSupportedUse,
@@ -115,12 +116,20 @@ export function healthPresentation(provider: PublicModelProvider): ProviderHealt
 
 export function selectableWorkflowProviders(
   providers: readonly PublicModelProvider[],
+  role?: ModelPolicyAgentType | 'default',
 ): PublicModelProvider[] {
+  const requiresCodingCapabilities = role === 'coder'
+    || role === 'tester'
+    || role === 'fixer'
+    || role === 'default';
   return providers.filter((provider) => (
     provider.enabled
     && provider.configured
     && provider.runtimeType === 'claude-code'
     && provider.capabilities.supportsClaudeCode
     && provider.capabilities.supportsAgentWorkflow
+    && (!requiresCodingCapabilities || (
+      provider.capabilities.supportsTools && provider.capabilities.supportsMCP
+    ))
   ));
 }

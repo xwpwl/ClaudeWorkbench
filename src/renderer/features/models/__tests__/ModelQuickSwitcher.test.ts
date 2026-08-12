@@ -75,6 +75,22 @@ describe('ModelQuickSwitcher', () => {
     expect(html).toContain('恢复跟随项目 / 全局策略');
   });
 
+  it('keeps invalid task override recovery visible without showing a fake fallback model', () => {
+    const html = renderToStaticMarkup(React.createElement(ModelQuickSwitcher, {
+      selection: null,
+      options,
+      error: '该模型当前不能用于 Agent，请重新选择。',
+      isTaskRunning: false,
+      open: true,
+      onOpenChange: () => {},
+      onSwitch: () => {},
+      onClearOverride: () => {},
+    }));
+    expect(html).toContain('需要重新配置');
+    expect(html).toContain('该模型当前不能用于 Agent，请重新选择。');
+    expect(html).toContain('data-testid="follow-model-policy"');
+  });
+
   it('warns idle users that a switch changes future calls only', async () => {
     const confirm = vi.fn(() => true);
     const switchModel = vi.fn(async () => {});
@@ -105,6 +121,8 @@ describe('ModelQuickSwitcher', () => {
       onOpenChange: () => {}, onSwitch: () => {},
     }));
     expect(html).toContain('MiMo');
+    expect(html).toContain('用途：Task Agent override');
+    expect(html).toContain('来源：已配置 Provider');
     expect(html).not.toContain('DeepSeek');
   });
 

@@ -55,6 +55,7 @@ const provider: PublicModelProvider = {
   isDefault: true,
   configured: true,
   credentialSource: 'credential_store',
+  agentModelStatus: 'valid',
   capabilities: {
     supportsClaudeCode: true,
     supportsAgentWorkflow: true,

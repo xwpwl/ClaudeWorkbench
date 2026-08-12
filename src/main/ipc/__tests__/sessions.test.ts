@@ -7,7 +7,10 @@ type Handler = (event: unknown, ...args: unknown[]) => unknown;
 
 function createSessionHarness(
   project: Record<string, unknown> | null,
-  options: { publicTransport?: boolean } = {},
+  options: {
+    publicTransport?: boolean;
+    validateExecutableModel?: (request: { projectId: string; fallbackModelId: string | null }) => Promise<void>;
+  } = {},
 ) {
   const handlers = new Map<string, Handler>();
   const ipcMain = {
@@ -21,6 +24,7 @@ function createSessionHarness(
     (options.publicTransport ? publicIpcMainForTest(ipcMain as never) : ipcMain) as never,
     db as never,
     { forkSession: vi.fn() } as never,
+    { validateExecutableModel: options.validateExecutableModel },
   );
   const create = (...args: unknown[]) => {
     const handler = handlers.get(IPC_CHANNELS.SESSION_CREATE);
@@ -31,6 +35,21 @@ function createSessionHarness(
 }
 
 describe('session create IPC', () => {
+  it('does not create an empty Session or Task when the effective Provider runtime is incompatible', async () => {
+    const validateExecutableModel = vi.fn(async () => {
+      throw Object.assign(new Error('runtime incompatible'), { code: 'RUNTIME_INCOMPATIBLE' });
+    });
+    const test = createSessionHarness({ id: 'project-a' }, { validateExecutableModel });
+
+    await expect(test.create('project-a', { model: 'renderer-intent' }))
+      .rejects.toMatchObject({ code: 'RUNTIME_INCOMPATIBLE' });
+    expect(validateExecutableModel).toHaveBeenCalledWith({
+      projectId: 'project-a',
+      fallbackModelId: 'renderer-intent',
+    });
+    expect(test.db.createSession).not.toHaveBeenCalled();
+  });
+
   it('rejects a forged project before generating or writing Session and Task rows', async () => {
     const test = createSessionHarness(null);
 

@@ -32,6 +32,14 @@ export type ImplementedAgentRuntimeType = (typeof IMPLEMENTED_AGENT_RUNTIME_TYPE
 export const UNSUPPORTED_CLAUDE_CODE_RUNTIME_MESSAGE =
   '当前 Provider 不支持 Claude Code Agent Runtime';
 
+export const PROVIDER_RUNTIME_NOT_RUNNABLE_MESSAGE =
+  '当前 Provider 可以管理和测试，但尚不能用于 Claude Code Agent。请选择支持 Claude Code Runtime 的 Provider。';
+
+export const AGENT_MODEL_RECONFIGURATION_MESSAGE =
+  '该模型当前不能用于 Agent，请重新选择。';
+
+export type AgentModelConfigurationStatus = 'valid' | 'needs_reconfiguration';
+
 export interface ProviderCapabilities {
   supportsClaudeCode: boolean;
   supportsAgentWorkflow: boolean;
@@ -167,6 +175,8 @@ export interface PublicModelProvider {
   credentialSource: ProviderCredentialSource;
   capabilities: ProviderCapabilities;
   supportedUses: ProviderSupportedUse[];
+  /** Main-process-derived status for any executable Agent model use. */
+  agentModelStatus: AgentModelConfigurationStatus;
   health: ProviderHealth;
   defaultModelId: string | null;
   createdAt: number;
@@ -175,10 +185,11 @@ export interface PublicModelProvider {
 
 type PublicModelProviderProjectionInput = Omit<
   PublicModelProvider,
-  'supportedUses' | 'baseUrlPathRedacted'
+  'supportedUses' | 'baseUrlPathRedacted' | 'agentModelStatus'
 > & {
   supportedUses?: readonly ProviderSupportedUse[];
   baseUrlPathRedacted?: boolean;
+  agentModelStatus?: AgentModelConfigurationStatus;
 };
 
 /**
@@ -203,6 +214,15 @@ export function toPublicModelProvider(
     credentialSource: provider.credentialSource,
     capabilities: { ...provider.capabilities },
     supportedUses: supportedUsesForCapabilities(provider.capabilities),
+    agentModelStatus: provider.agentModelStatus ?? (
+      provider.runtimeType === 'claude-code'
+      && provider.capabilities.supportsClaudeCode
+      && provider.capabilities.supportsAgentWorkflow
+      && provider.capabilities.supportsTools
+      && provider.capabilities.supportsMCP
+        ? 'valid'
+        : 'needs_reconfiguration'
+    ),
     health: { ...provider.health },
     defaultModelId: provider.defaultModelId,
     createdAt: provider.createdAt,

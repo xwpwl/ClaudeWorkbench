@@ -1,4 +1,4 @@
-import { UNSUPPORTED_CLAUDE_CODE_RUNTIME_MESSAGE } from '../../shared/types/modelProviders';
+import { AGENT_MODEL_RECONFIGURATION_MESSAGE } from '../../shared/types/modelProviders';
 import type { PolicyRating, PublicAgentModelPolicyReference } from '../../shared/types/modelProviders';
 import type { ModelTierScope } from '../../shared/types/modelTiers';
 import type { RuntimeGate } from './ModelSelectionResolver';
@@ -65,7 +65,7 @@ export interface UpdateAgentPolicyNotesInput {
 
 export class AgentModelPolicyServiceError extends Error {
   constructor(
-    readonly code: 'INVALID_POLICY' | 'PROVIDER_NOT_FOUND' | 'PROJECT_NOT_FOUND',
+    readonly code: 'INVALID_POLICY' | 'PROVIDER_NOT_FOUND' | 'PROJECT_NOT_FOUND' | 'RUNTIME_INCOMPATIBLE',
     message: string,
   ) {
     super(message);
@@ -268,14 +268,23 @@ export class AgentModelPolicyService {
       provider.capabilities,
     );
     if (trusted.runtimeType !== 'claude-code' || !trusted.capabilities.supportsClaudeCode) {
-      throw new Error(UNSUPPORTED_CLAUDE_CODE_RUNTIME_MESSAGE);
+      throw new AgentModelPolicyServiceError(
+        'RUNTIME_INCOMPATIBLE',
+        AGENT_MODEL_RECONFIGURATION_MESSAGE,
+      );
     }
     if (!trusted.capabilities.supportsAgentWorkflow) {
-      throw new Error('Current Provider does not support Agent Workflow.');
+      throw new AgentModelPolicyServiceError(
+        'RUNTIME_INCOMPATIBLE',
+        AGENT_MODEL_RECONFIGURATION_MESSAGE,
+      );
     }
     if (role === 'default' || role === 'coder' || role === 'tester' || role === 'fixer') {
       if (!trusted.capabilities.supportsTools || !trusted.capabilities.supportsMCP) {
-        throw new Error('Current Agent role requires Provider tools and MCP capabilities.');
+        throw new AgentModelPolicyServiceError(
+          'RUNTIME_INCOMPATIBLE',
+          AGENT_MODEL_RECONFIGURATION_MESSAGE,
+        );
       }
     }
     this.runtimeGate.assertRunnable({

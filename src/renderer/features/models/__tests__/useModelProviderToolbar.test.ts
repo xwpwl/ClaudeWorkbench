@@ -55,6 +55,7 @@ const selection: ResolvedModelSelection = {
 const option: TaskModelSwitchOptionPublic = {
   providerId: 'mimo', providerName: 'MiMo', modelId: 'mimo-v2.5-pro',
   modelDisplayName: 'MiMo Pro', runtimeType: 'claude-code',
+  purpose: 'task_agent_override', source: 'configured_provider',
 };
 
 function api() {
@@ -100,6 +101,19 @@ describe('task model toolbar loader', () => {
     expect(result.options).toEqual([option]);
     expect(service).not.toHaveProperty('listModelProviders');
     expect(service).not.toHaveProperty('listModelProviderModels');
+  });
+
+  it('keeps switch options visible and marks an invalid effective override for reconfiguration', async () => {
+    const service = api();
+    service.getEffectiveModelSelection.mockRejectedValue(
+      Object.assign(new Error('private runtime detail'), { code: 'RUNTIME_INCOMPATIBLE' }),
+    );
+
+    await expect(loadTaskModelToolbar(service, 'task-1')).resolves.toEqual({
+      selection: null,
+      options: [option],
+      error: '该模型当前不能用于 Agent，请重新选择。',
+    });
   });
 
   it('projects options to the closed safe display fields', async () => {

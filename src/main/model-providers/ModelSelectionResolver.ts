@@ -174,6 +174,19 @@ export class ModelSelectionResolver {
     return this.resolveRequest(request);
   }
 
+  /** Validates one explicit database Provider/model pair without consulting fallback policy. */
+  assertProviderModelRunnable(
+    providerId: string,
+    modelId: string,
+    agentType: ModelPolicyAgentType = 'coder',
+  ): ResolvedModelSelection {
+    return this.resolveReference(
+      { providerId, modelId },
+      'global_default',
+      { agentType, use: 'agent-workflow' },
+    );
+  }
+
   /**
    * Resolves a project's baseline role policy without accepting or consulting a task ID.
    * The caller supplies one main-prepared tier snapshot shared by all inspected roles.
@@ -224,6 +237,8 @@ export class ModelSelectionResolver {
             modelId: model.modelId,
             modelDisplayName: model.displayName,
             runtimeType: 'claude-code',
+            purpose: 'task_agent_override',
+            source: 'configured_provider',
           });
         }
       }
@@ -472,6 +487,12 @@ export class ModelSelectionResolver {
       throw new ModelSelectionFailure(
         'WORKFLOW_CAPABILITY_MISSING',
         'Current Provider does not support Agent Workflow.',
+      );
+    }
+    if (!trusted.capabilities.supportsTools || !trusted.capabilities.supportsMCP) {
+      throw new ModelSelectionFailure(
+        'WORKFLOW_CAPABILITY_MISSING',
+        'Task override models must support tools and MCP.',
       );
     }
     this.assertRuntimeRunnable({

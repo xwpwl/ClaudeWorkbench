@@ -130,6 +130,7 @@ describe('SettingsDialog Agent category', () => {
       id: 'mimo', name: 'MiMo', type: 'anthropic-compatible', apiFormat: 'anthropic-messages',
       runtimeType: 'claude-code', baseUrl: 'https://api.example.test', baseUrlPathRedacted: false,
       enabled: true, isDefault: false, configured: true, credentialSource: 'credential_store',
+      agentModelStatus: 'valid',
       capabilities: { supportsClaudeCode: true, supportsAgentWorkflow: true, supportsTools: true, supportsMCP: true, supportsStreaming: true, supportsVision: false },
       supportedUses: ['chat', 'agent_task', 'claude_code', 'mcp_tools'],
       health: { state: 'connected', lastTestedAt: 1, lastErrorType: null, latencyMs: 1 },

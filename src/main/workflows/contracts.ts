@@ -1,5 +1,6 @@
 import type { CliPermissionMode } from '../../shared/types/claude';
 import type {
+  ModelPolicyAgentType,
   ResolvedModelSelection,
   WorkflowModelPolicySnapshotRequest,
   WorkflowModelSelectionPolicy,
@@ -239,6 +240,22 @@ export interface WorkflowModelSelectionGateway {
   snapshotWorkflowPolicy(
     request: WorkflowModelPolicySnapshotRequest,
   ): MaybePromise<WorkflowModelSelectionPolicy>;
+  resolve?(request: {
+    taskId: string;
+    projectId: string;
+    agentType: ModelPolicyAgentType;
+    fallbackModelId: string | null;
+    use: 'agent-workflow';
+  }): MaybePromise<ResolvedModelSelection>;
+  revalidatePinnedSelection?(
+    selection: ResolvedModelSelection,
+    request: {
+      taskId: string;
+      projectId: string;
+      agentType: ModelPolicyAgentType;
+      use: 'agent-workflow';
+    },
+  ): MaybePromise<ResolvedModelSelection>;
 }
 
 export interface WorkflowDependencies {

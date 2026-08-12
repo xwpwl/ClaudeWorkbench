@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 
 export interface TopToolbarModelProviderState {
-  selection: ResolvedModelSelection;
+  selection: ResolvedModelSelection | null;
   options: TaskModelSwitchOptionPublic[];
   error: string | null;
   onSwitch(next: ProviderModelRef): Promise<void> | void;

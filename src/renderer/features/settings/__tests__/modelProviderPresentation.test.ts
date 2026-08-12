@@ -23,6 +23,7 @@ function provider(overrides: Partial<PublicModelProvider> = {}): PublicModelProv
     isDefault: true,
     configured: true,
     credentialSource: 'credential_store',
+    agentModelStatus: 'valid',
     capabilities: {
       supportsClaudeCode: true,
       supportsAgentWorkflow: true,
@@ -165,6 +166,24 @@ describe('model Provider presentation', () => {
     });
     expect(selectableWorkflowProviders([disabled, unconfigured, rawOpenAI, provider()]))
       .toEqual([provider()]);
+  });
+
+  it('keeps a workflow-only Provider for Planner and Reviewer but excludes it from coding roles', () => {
+    const workflowOnly = provider({
+      id: 'workflow-only',
+      agentModelStatus: 'needs_reconfiguration',
+      capabilities: {
+        ...provider().capabilities,
+        supportsTools: false,
+        supportsMCP: false,
+      },
+    });
+
+    expect(selectableWorkflowProviders([workflowOnly], 'planner')).toEqual([workflowOnly]);
+    expect(selectableWorkflowProviders([workflowOnly], 'reviewer')).toEqual([workflowOnly]);
+    for (const role of ['coder', 'tester', 'fixer', 'default'] as const) {
+      expect(selectableWorkflowProviders([workflowOnly], role)).toEqual([]);
+    }
   });
 
   it('localizes Provider, Runtime, health, capability, and supported-use labels in English', () => {

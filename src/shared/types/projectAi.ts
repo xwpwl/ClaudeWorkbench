@@ -94,6 +94,8 @@ export interface TaskModelSwitchOptionPublic {
   modelId: string;
   modelDisplayName: string | null;
   runtimeType: ImplementedAgentRuntimeType;
+  purpose?: 'task_agent_override';
+  source?: 'configured_provider';
 }
 
 export interface ListTaskModelSwitchOptionsRequest {

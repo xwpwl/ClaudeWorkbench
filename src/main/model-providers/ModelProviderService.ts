@@ -18,6 +18,7 @@ import type {
   UpdateProviderInput,
 } from '../../shared/types/modelProviders';
 import { toPublicModelProvider } from '../../shared/types/modelProviders';
+import { PROVIDER_RUNTIME_NOT_RUNNABLE_MESSAGE } from '../../shared/types/modelProviders';
 import { ProviderCapabilityResolver } from './ProviderCapabilityResolver';
 import {
   normalizeProviderBaseUrl,
@@ -124,6 +125,7 @@ export type ModelProviderServiceErrorCode =
   | 'CREDENTIAL_REENTRY_REQUIRED'
   | 'DELETE_CONFIRMATION_REQUIRED'
   | 'UNSUPPORTED_RUNTIME'
+  | 'PROVIDER_RUNTIME_NOT_RUNNABLE'
   | 'CREDENTIAL_CLEANUP_PENDING';
 
 export class ModelProviderServiceError extends Error {
@@ -143,6 +145,7 @@ export interface ModelProviderServiceDependencies {
   now?: () => number;
   randomId?: () => string;
   isProviderInUse?: (providerId: string) => boolean;
+  validateAgentDefault?: (providerId: string, modelId: string) => void;
 }
 
 interface ValidatedDraft {
@@ -171,6 +174,7 @@ export class ModelProviderService {
   private readonly now: () => number;
   private readonly randomId: () => string;
   private readonly isProviderInUse: (providerId: string) => boolean;
+  private readonly validateAgentDefault?: (providerId: string, modelId: string) => void;
   private readonly capabilityResolver = new ProviderCapabilityResolver();
   private readonly validationTokens = new Map<string, ValidatedDraft>();
   private readonly validationTokenTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -182,6 +186,7 @@ export class ModelProviderService {
     this.now = dependencies.now ?? Date.now;
     this.randomId = dependencies.randomId ?? randomUUID;
     this.isProviderInUse = dependencies.isProviderInUse ?? (() => false);
+    this.validateAgentDefault = dependencies.validateAgentDefault;
   }
 
   listProviders(input: ModelProviderListRequest = {}): ModelProviderPage {
@@ -320,6 +325,13 @@ export class ModelProviderService {
     }
     this.assertNotInUse(input.providerId);
     const existing = validated.expectedProvider;
+    if (existing.isDefault) {
+      this.assertAgentDefaultEnvelope(
+        validated.draft.type,
+        validated.draft.apiFormat,
+        validated.draft.requestedCapabilities,
+      );
+    }
     const now = this.now();
     let credentialRef = existing.credentialRef;
     let newCredentialRef: string | null = null;
@@ -404,16 +416,14 @@ export class ModelProviderService {
     if (!provider.enabled) {
       throw new ModelProviderServiceError('PROVIDER_DISABLED', 'Disabled Provider cannot be default.');
     }
-    const trusted = this.capabilityResolver.resolve(
-      provider.type,
-      provider.apiFormat,
-      provider.capabilities,
-    );
-    if (trusted.runtimeType !== 'claude-code' || !trusted.capabilities.supportsClaudeCode) {
-      throw new ModelProviderServiceError(
-        'UNSUPPORTED_RUNTIME',
-        '当前 Provider 不支持 Claude Code Agent Runtime',
-      );
+    if (!provider.credentialRef || !provider.defaultModelId) {
+      throw this.agentDefaultNotRunnable();
+    }
+    this.assertAgentDefaultEnvelope(provider.type, provider.apiFormat, provider.capabilities);
+    try {
+      this.validateAgentDefault?.(provider.id, provider.defaultModelId);
+    } catch {
+      throw this.agentDefaultNotRunnable();
     }
     const now = this.now();
     this.persistence.setDefaultProvider(providerId, now);
@@ -582,18 +592,23 @@ export class ModelProviderService {
   }
 
   private publicProvider(provider: StoredModelProvider): PublicModelProvider {
+    const trusted = this.capabilityResolver.resolve(
+      provider.type,
+      provider.apiFormat,
+      provider.capabilities,
+    );
     return toPublicModelProvider({
       id: provider.id,
       name: provider.name,
       type: provider.type,
       apiFormat: provider.apiFormat,
-      runtimeType: provider.runtimeType,
+      runtimeType: trusted.runtimeType,
       baseUrl: provider.baseUrl,
       enabled: provider.enabled,
       isDefault: provider.isDefault,
       configured: provider.credentialRef !== null,
       credentialSource: provider.credentialRef ? 'credential_store' : 'none',
-      capabilities: { ...provider.capabilities },
+      capabilities: { ...trusted.capabilities },
       health: { ...provider.health },
       defaultModelId: provider.defaultModelId,
       createdAt: provider.createdAt,
@@ -616,6 +631,30 @@ export class ModelProviderService {
         'Provider is used by an active task and cannot be changed.',
       );
     }
+  }
+
+  private assertAgentDefaultEnvelope(
+    type: ModelProviderType,
+    apiFormat: ModelApiFormat,
+    requestedCapabilities?: Partial<ProviderCapabilities>,
+  ): void {
+    const trusted = this.capabilityResolver.resolve(type, apiFormat, requestedCapabilities);
+    if (
+      trusted.runtimeType !== 'claude-code'
+      || !trusted.capabilities.supportsClaudeCode
+      || !trusted.capabilities.supportsAgentWorkflow
+      || !trusted.capabilities.supportsTools
+      || !trusted.capabilities.supportsMCP
+    ) {
+      throw this.agentDefaultNotRunnable();
+    }
+  }
+
+  private agentDefaultNotRunnable(): ModelProviderServiceError {
+    return new ModelProviderServiceError(
+      'PROVIDER_RUNTIME_NOT_RUNNABLE',
+      PROVIDER_RUNTIME_NOT_RUNNABLE_MESSAGE,
+    );
   }
 }
 

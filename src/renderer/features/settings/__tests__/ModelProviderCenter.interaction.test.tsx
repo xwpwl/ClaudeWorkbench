@@ -48,6 +48,7 @@ function provider(id: 'a' | 'b'): PublicModelProvider {
     isDefault: id === 'a',
     configured: true,
     credentialSource: 'credential_store',
+    agentModelStatus: 'valid',
     capabilities,
     supportedUses: ['chat', 'agent_task', 'claude_code', 'mcp_tools'],
     health: {

@@ -15,10 +15,12 @@ import {
   type ProjectModelPolicyRecord,
   type TaskModelOverrideRecord,
 } from "../ModelProviderRepository";
-import type {
-  CredentialCleanupJob,
-  StoredModelProvider,
-  StoredProviderModel,
+import {
+  ModelProviderService,
+  type CredentialStorePort,
+  type CredentialCleanupJob,
+  type StoredModelProvider,
+  type StoredProviderModel,
 } from "../ModelProviderService";
 import type { ModelPolicyAgentType } from "../../../shared/types/modelProviders";
 import type { PersistedModelPolicyReference } from "../../../shared/types/modelTiers";
@@ -148,6 +150,58 @@ describe("ModelProviderRepository", () => {
     database = new AppDatabase(databasePath);
     repository = new ModelProviderRepository(database);
     expect(repository.getProvider("provider-1")).toEqual(provider());
+  });
+
+  it("derives a legacy management-only default as needs-reconfiguration after restart without fallback", () => {
+    const deepSeek = provider({
+      id: "provider-deepseek",
+      name: "DeepSeek",
+      type: "openai-compatible",
+      apiFormat: "openai-chat-completions",
+      runtimeType: "none",
+      credentialRef: CREDENTIAL_ONE,
+      defaultModelId: "deepseek-chat",
+      isDefault: true,
+      capabilities: {
+        supportsClaudeCode: false,
+        supportsAgentWorkflow: false,
+        supportsTools: true,
+        supportsMCP: false,
+        supportsStreaming: true,
+        supportsVision: false,
+      },
+    });
+    const anthropic = provider({
+      id: "provider-anthropic",
+      credentialRef: CREDENTIAL_TWO,
+      isDefault: false,
+    });
+    repository.createProvider(deepSeek, [model({
+      providerId: deepSeek.id,
+      modelId: deepSeek.defaultModelId as string,
+    })]);
+    repository.createProvider(anthropic, [model({ providerId: anthropic.id })]);
+
+    database.close();
+    database = new AppDatabase(databasePath);
+    repository = new ModelProviderRepository(database);
+    const credentialStore: CredentialStorePort = {
+      create: vi.fn(), read: vi.fn(), delete: vi.fn(),
+    };
+    const service = new ModelProviderService({
+      persistence: repository,
+      credentialStore,
+      connectionTester: { test: vi.fn() },
+    });
+
+    expect(service.getProvider(deepSeek.id)).toMatchObject({
+      isDefault: true,
+      runtimeType: "none",
+      agentModelStatus: "needs_reconfiguration",
+    });
+    expect(repository.getDefaultProvider()?.id).toBe(deepSeek.id);
+    expect(repository.getProvider(deepSeek.id)?.credentialRef).toBe(CREDENTIAL_ONE);
+    expect(repository.getProvider(anthropic.id)?.isDefault).toBe(false);
   });
 
   it("returns deterministic paginated pages and filters enabled state", () => {

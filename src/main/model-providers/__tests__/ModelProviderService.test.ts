@@ -209,6 +209,7 @@ function harness(options: {
   active?: boolean;
   now?: () => number;
   randomId?: () => string;
+  validateAgentDefault?: (providerId: string, modelId: string) => void;
 } = {}) {
   const persistence = new FakePersistence();
   const secrets = new Map<string, string>([['safe-storage://v1/old', 'old-secret']]);
@@ -237,6 +238,7 @@ function harness(options: {
     now: options.now ?? (() => time),
     randomId: options.randomId ?? (() => ids.shift() ?? 'generated-id'),
     isProviderInUse: () => options.active ?? false,
+    validateAgentDefault: options.validateAgentDefault,
   });
   return {
     service,
@@ -456,6 +458,36 @@ describe('ModelProviderService validation and create', () => {
 });
 
 describe('ModelProviderService update, test, and delete', () => {
+  it('does not preserve default status when an update would make the Provider management-only', async () => {
+    const test = harness();
+    test.persistence.providers.set('provider-existing', storedProvider({ isDefault: true }));
+    const validation = await test.service.validateDraft({
+      providerId: 'provider-existing',
+      name: 'DeepSeek',
+      type: 'openai-compatible',
+      apiFormat: 'openai-chat-completions',
+      baseUrlIntent: { mode: 'replace', value: 'https://api.deepseek.example/v1' },
+      credential: 'deepseek-secret',
+      defaultModelId: 'deepseek-chat',
+      capabilities: {
+        supportsClaudeCode: true,
+        supportsAgentWorkflow: true,
+      },
+    });
+
+    await expect(test.service.updateProvider({
+      providerId: 'provider-existing',
+      validationToken: validation.validationToken as string,
+    })).rejects.toMatchObject({ code: 'PROVIDER_RUNTIME_NOT_RUNNABLE' });
+    expect(test.persistence.getProvider('provider-existing')).toMatchObject({
+      type: 'anthropic',
+      apiFormat: 'anthropic-messages',
+      runtimeType: 'claude-code',
+      isDefault: true,
+    });
+    expect(test.credentialStore.create).not.toHaveBeenCalled();
+  });
+
   it('rejects a same-millisecond stale preserve token without pairing the old endpoint with the new credential', async () => {
     const test = harness();
     const endpointA = 'https://gateway.example/tenant-a';
@@ -1064,12 +1096,14 @@ describe('ModelProviderService queries', () => {
   });
 
   it('sets one existing enabled Provider as the global default', () => {
-    const test = harness();
+    const validateAgentDefault = vi.fn();
+    const test = harness({ validateAgentDefault });
     test.persistence.providers.set('provider-existing', storedProvider());
     test.persistence.providers.set('provider-two', storedProvider({ id: 'provider-two', isDefault: true }));
     test.service.setDefaultProvider('provider-existing');
     expect(test.persistence.getProvider('provider-existing')?.isDefault).toBe(true);
     expect(test.persistence.getProvider('provider-two')?.isDefault).toBe(false);
+    expect(validateAgentDefault).toHaveBeenCalledWith('provider-existing', 'claude-model');
   });
 
   it('refuses to set a disabled Provider as default', () => {
@@ -1096,8 +1130,41 @@ describe('ModelProviderService queries', () => {
     }));
 
     expect(() => test.service.setDefaultProvider('provider-existing'))
-      .toThrow('当前 Provider 不支持 Claude Code Agent Runtime');
+      .toThrowError(expect.objectContaining({
+        code: 'PROVIDER_RUNTIME_NOT_RUNNABLE',
+        message: '当前 Provider 可以管理和测试，但尚不能用于 Claude Code Agent。请选择支持 Claude Code Runtime 的 Provider。',
+      }));
     expect(test.persistence.getProvider('provider-existing')?.isDefault).toBe(false);
+  });
+
+  it('re-derives public runtime facts and marks a legacy invalid default for reconfiguration', () => {
+    const test = harness();
+    test.persistence.providers.set('provider-existing', storedProvider({
+      type: 'openai-compatible',
+      apiFormat: 'openai-chat-completions',
+      runtimeType: 'claude-code',
+      isDefault: true,
+      capabilities: {
+        supportsClaudeCode: true,
+        supportsAgentWorkflow: true,
+        supportsTools: true,
+        supportsMCP: true,
+        supportsStreaming: true,
+        supportsVision: true,
+      },
+    }));
+
+    expect(test.service.getProvider('provider-existing')).toMatchObject({
+      runtimeType: 'none',
+      isDefault: true,
+      agentModelStatus: 'needs_reconfiguration',
+      capabilities: {
+        supportsClaudeCode: false,
+        supportsAgentWorkflow: false,
+      },
+    });
+    expect(test.persistence.getProvider('provider-existing')?.credentialRef)
+      .toBe('safe-storage://v1/old');
   });
 
   it('disables a default Provider and clears its default status atomically', () => {

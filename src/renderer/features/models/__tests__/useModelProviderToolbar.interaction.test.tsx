@@ -70,7 +70,7 @@ describe('useModelProviderToolbar task identity', () => {
       ({ taskId }) => useModelProviderToolbar(taskId),
       { initialProps: { taskId: 'task-a' as string | null } },
     );
-    await waitFor(() => expect(rendered.result.current?.selection.providerName).toBe('Provider task-a'));
+    await waitFor(() => expect(rendered.result.current?.selection?.providerName).toBe('Provider task-a'));
 
     rendered.rerender({ taskId: 'task-b' });
 
@@ -92,10 +92,10 @@ describe('useModelProviderToolbar task identity', () => {
     rendered.rerender({ taskId: 'task-b' });
 
     await act(async () => taskB.resolve(selection('task-b')));
-    await waitFor(() => expect(rendered.result.current?.selection.providerName).toBe('Provider task-b'));
+    await waitFor(() => expect(rendered.result.current?.selection?.providerName).toBe('Provider task-b'));
     await act(async () => taskA.resolve(selection('task-a')));
 
-    expect(rendered.result.current?.selection.providerName).toBe('Provider task-b');
+    expect(rendered.result.current?.selection?.providerName).toBe('Provider task-b');
   });
 
   it('does not show a task A mutation error after moving to task B', async () => {
@@ -105,7 +105,7 @@ describe('useModelProviderToolbar task identity', () => {
       ({ taskId }) => useModelProviderToolbar(taskId),
       { initialProps: { taskId: 'task-a' as string | null } },
     );
-    await waitFor(() => expect(rendered.result.current?.selection.providerName).toBe('Provider task-a'));
+    await waitFor(() => expect(rendered.result.current?.selection?.providerName).toBe('Provider task-a'));
     let mutation!: Promise<unknown>;
     act(() => {
       mutation = rendered.result.current!.onSwitch({ providerId: 'next', modelId: 'next' })
@@ -113,11 +113,11 @@ describe('useModelProviderToolbar task identity', () => {
     });
 
     rendered.rerender({ taskId: 'task-b' });
-    await waitFor(() => expect(rendered.result.current?.selection.providerName).toBe('Provider task-b'));
+    await waitFor(() => expect(rendered.result.current?.selection?.providerName).toBe('Provider task-b'));
     await act(async () => staleMutation.reject(new Error('stale task A failure')));
     await mutation;
 
-    expect(rendered.result.current?.selection.providerName).toBe('Provider task-b');
+    expect(rendered.result.current?.selection?.providerName).toBe('Provider task-b');
     expect(rendered.result.current?.error).toBeNull();
   });
 
@@ -128,7 +128,7 @@ describe('useModelProviderToolbar task identity', () => {
       ({ taskId }) => useModelProviderToolbar(taskId),
       { initialProps: { taskId: 'task-a' as string | null } },
     );
-    await waitFor(() => expect(rendered.result.current?.selection.providerName).toBe('Provider task-a'));
+    await waitFor(() => expect(rendered.result.current?.selection?.providerName).toBe('Provider task-a'));
     let mutation!: Promise<unknown>;
     act(() => {
       mutation = rendered.result.current!.onSwitch({ providerId: 'next', modelId: 'next' })
@@ -136,13 +136,13 @@ describe('useModelProviderToolbar task identity', () => {
     });
 
     rendered.rerender({ taskId: 'task-b' });
-    await waitFor(() => expect(rendered.result.current?.selection.providerName).toBe('Provider task-b'));
+    await waitFor(() => expect(rendered.result.current?.selection?.providerName).toBe('Provider task-b'));
     rendered.rerender({ taskId: 'task-a' });
-    await waitFor(() => expect(rendered.result.current?.selection.providerName).toBe('Provider task-a'));
+    await waitFor(() => expect(rendered.result.current?.selection?.providerName).toBe('Provider task-a'));
     await act(async () => staleA1Mutation.reject(new Error('stale A1 failure')));
     await mutation;
 
-    expect(rendered.result.current?.selection.providerName).toBe('Provider task-a');
+    expect(rendered.result.current?.selection?.providerName).toBe('Provider task-a');
     expect(rendered.result.current?.error).toBeNull();
   });
 });

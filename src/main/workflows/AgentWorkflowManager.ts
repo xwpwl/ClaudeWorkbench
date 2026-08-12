@@ -8,6 +8,7 @@ import type {
   WorkflowStatus,
 } from '../../shared/types/workflow';
 import type { ResolvedModelSelection } from '../../shared/types/modelProviders';
+import { AGENT_MODEL_RECONFIGURATION_MESSAGE } from '../../shared/types/modelProviders';
 import { MAX_WORKFLOW_REVIEW_ROUNDS } from '../../shared/types/workflow';
 import { normalizeAgentModelPolicy, resolveAgentModel } from './AgentModelPolicy';
 import type {
@@ -156,7 +157,29 @@ function stageFailure(error: unknown): { code: string; message: string } {
     return { code: error.code, message: 'Agent returned invalid structured output.' };
   }
   if (error instanceof WorkflowError) return { code: error.code, message: error.message };
+  if (isRuntimePreflightFailure(error)) {
+    return {
+      code: (error as { code: string }).code,
+      message: AGENT_MODEL_RECONFIGURATION_MESSAGE,
+    };
+  }
   return { code: 'AGENT_STAGE_FAILED', message: 'Agent stage failed.' };
+}
+
+function isRuntimePreflightFailure(error: unknown): boolean {
+  const code = error && typeof error === 'object' && 'code' in error
+    ? (error as { code?: unknown }).code
+    : null;
+  return code === 'RUNTIME_INCOMPATIBLE'
+    || code === 'WORKFLOW_CAPABILITY_MISSING'
+    || code === 'PROVIDER_DELETED'
+    || code === 'PROVIDER_DISABLED'
+    || code === 'PROVIDER_UNCONFIGURED'
+    || code === 'CONNECTION_UNAVAILABLE'
+    || code === 'MODEL_MISSING'
+    || code === 'SOURCE_CHANGED'
+    || code === 'CLAUDE_CLI_UNAVAILABLE'
+    || code === 'SELECTION_UNAVAILABLE';
 }
 
 function publicSnapshot(workflow: PersistedWorkflowSnapshot): WorkflowSnapshot {
@@ -570,7 +593,7 @@ export class AgentWorkflowManager {
         workflow,
         'planner',
         error,
-        planningGitKind === 'not_repository',
+        planningGitKind === 'not_repository' || isRuntimePreflightFailure(error),
       );
     }
   }
@@ -590,7 +613,12 @@ export class AgentWorkflowManager {
           if (isTerminal(persisted.status)) throw error;
         }
         const stage = this.stageForStatus(workflow.status);
-        workflow = await this.failWorkflowStage(workflow, stage, error);
+        workflow = await this.failWorkflowStage(
+          workflow,
+          stage,
+          error,
+          isRuntimePreflightFailure(error),
+        );
       }
     }
     return workflow;
@@ -839,6 +867,7 @@ export class AgentWorkflowManager {
       return value;
     }
 
+    await this.revalidateStageModel(workflow, stage);
     const startedAt = existing?.startedAt ?? this.now().toISOString();
     const running: WorkflowStageRecord = {
       id,
@@ -1167,6 +1196,36 @@ export class AgentWorkflowManager {
     if (!policy) return undefined;
     if (stage === 'coder' && workflow.reviewRound > 1) return policy.fixer;
     return policy[stage];
+  }
+
+  private async revalidateStageModel(
+    workflow: PersistedWorkflowSnapshot,
+    stage: AgentType,
+  ): Promise<void> {
+    const selections = this.dependencies.modelSelections;
+    if (!selections) return;
+    const agentType = stage === 'coder' && workflow.reviewRound > 1 ? 'fixer' : stage;
+    const pinned = this.pinnedSelection(workflow, stage);
+    if (pinned) {
+      // Production always supplies this method; optional test/legacy gateways remain compatible.
+      if (!selections.revalidatePinnedSelection) return;
+      await selections.revalidatePinnedSelection(pinned, {
+        taskId: workflow.taskId,
+        projectId: workflow.projectId,
+        agentType,
+        use: 'agent-workflow',
+      });
+      return;
+    }
+    if (selections.resolve) {
+      await selections.resolve({
+        taskId: workflow.taskId,
+        projectId: workflow.projectId,
+        agentType,
+        fallbackModelId: resolveAgentModel(workflow.modelPolicy, stage, workflow.currentModel) ?? null,
+        use: 'agent-workflow',
+      });
+    }
   }
 
   private invalidTransition(from: WorkflowStatus, to: WorkflowStatus): WorkflowError {

@@ -14,6 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import {
+  AGENT_MODEL_RECONFIGURATION_MESSAGE,
   POLICY_RATINGS,
   type AgentModelPolicyAssignment,
   type CreateProviderInput,
@@ -587,6 +588,9 @@ export function ModelProviderCenterView({
                         </span>
                         <span className="flex shrink-0 items-center gap-2">
                           {provider.isDefault ? <span style={{ color: 'var(--accent)' }}>{t('provider.center.default')}</span> : null}
+                          {provider.isDefault && provider.agentModelStatus === 'needs_reconfiguration' ? (
+                            <span style={{ color: 'var(--warning)' }}>需要重新配置</span>
+                          ) : null}
                           <span style={{ color: health.tone === 'success' ? 'var(--success)' : health.tone === 'danger' ? 'var(--error)' : 'var(--text-tertiary)' }}>
                             <span aria-hidden="true">●</span> {health.label}
                           </span>
@@ -603,6 +607,11 @@ export function ModelProviderCenterView({
                       {!runtimeCapable ? (
                         <span className="mt-2 block" style={{ color: 'var(--warning)' }}>
                           {t('provider.cards.unsupportedSummary')}
+                        </span>
+                      ) : null}
+                      {provider.isDefault && provider.agentModelStatus === 'needs_reconfiguration' ? (
+                        <span className="mt-1 block" role="alert" style={{ color: 'var(--warning)' }}>
+                          {AGENT_MODEL_RECONFIGURATION_MESSAGE}
                         </span>
                       ) : null}
                     </button>
@@ -1096,7 +1105,6 @@ export function AgentModelPolicyEditor({
   busy = false,
   onChange,
 }: AgentModelPolicyEditorProps) {
-  const runnable = selectableWorkflowProviders(providers);
   const assignmentByRole = new Map(assignments.map((assignment) => [assignment.agentType, assignment]));
   const referenceByRole = new Map(references.map((reference) => [reference.agentType, reference]));
 
@@ -1123,29 +1131,39 @@ export function AgentModelPolicyEditor({
           const tier = persisted?.reference.kind === 'tier' ? persisted.reference.tier : null;
           const notes = current?.notes ?? persisted?.notes;
           const roleName = localizedRole(role);
+          const runnable = selectableWorkflowProviders(providers, role);
+          const invalidCurrent = Boolean(current) && !runnable.some(
+            (provider) => provider.id === current?.providerId,
+          );
           return (
             <div key={role} className="grid grid-cols-[72px_minmax(160px,1fr)_92px_92px_92px] items-center gap-2 text-xs" data-testid="agent-policy-row">
               <strong>{roleName}</strong>
-              <select
-                aria-label={t('agent.manual.modelAria').replace('{role}', roleName)}
-                disabled={busy}
-                value={tier ? tierValue(tier) : current ? pairValue(current.providerId, current.modelId) : ''}
-                onChange={(event) => {
-                  const pair = parsePairValue(event.target.value);
-                  onChange(role, pair ? {
-                    agentType: role,
-                    ...pair,
-                    notes: current?.notes ?? { quality: null, speed: null, cost: null },
-                  } : null);
-                }}
-                className="provider-input"
-              >
-                <option value="">{t('agent.manual.followDefault')}</option>
-                {tier ? <option value={tierValue(tier)}>{t('agent.manual.tierValue').replace('{tier}', t(`agent.tiers.${tier === 'high_quality' ? 'highQuality' : tier}`))}</option> : null}
-                {runnable.flatMap((provider) => (modelsByProvider[provider.id] ?? []).map((model) => (
-                  <option key={`${provider.id}:${model.modelId}`} value={pairValue(provider.id, model.modelId)}>{provider.name} / {model.modelId}</option>
-                )))}
-              </select>
+              <div>
+                <select
+                  aria-label={t('agent.manual.modelAria').replace('{role}', roleName)}
+                  disabled={busy}
+                  value={tier ? tierValue(tier) : current ? pairValue(current.providerId, current.modelId) : ''}
+                  onChange={(event) => {
+                    const pair = parsePairValue(event.target.value);
+                    onChange(role, pair ? {
+                      agentType: role,
+                      ...pair,
+                      notes: current?.notes ?? { quality: null, speed: null, cost: null },
+                    } : null);
+                  }}
+                  className="provider-input"
+                >
+                  <option value="">{t('agent.manual.followDefault')}</option>
+                  {tier ? <option value={tierValue(tier)}>{t('agent.manual.tierValue').replace('{tier}', t(`agent.tiers.${tier === 'high_quality' ? 'highQuality' : tier}`))}</option> : null}
+                  {invalidCurrent && current ? (
+                    <option value={pairValue(current.providerId, current.modelId)} disabled>{AGENT_MODEL_RECONFIGURATION_MESSAGE}</option>
+                  ) : null}
+                  {runnable.flatMap((provider) => (modelsByProvider[provider.id] ?? []).map((model) => (
+                    <option key={`${provider.id}:${model.modelId}`} value={pairValue(provider.id, model.modelId)}>{provider.name} / {model.modelId}</option>
+                  )))}
+                </select>
+                {invalidCurrent ? <span role="alert" className="mt-1 block text-[10px]" style={{ color: 'var(--warning)' }}>{AGENT_MODEL_RECONFIGURATION_MESSAGE}</span> : null}
+              </div>
               {(['quality', 'speed', 'cost'] as const).map((field) => (
                 <label key={field}>
                   <span className="mb-1 block text-[10px]" style={{ color: 'var(--text-tertiary)' }}>{t(`agent.tiers.${field}`)}</span>
@@ -1264,7 +1282,6 @@ export function ProjectModelPolicyEditor({
   busy = false,
   onChange,
 }: ProjectModelPolicyEditorProps) {
-  const runnable = selectableWorkflowProviders(providers);
   const policyByRole = new Map(policies.map((policy) => [policy.agentType, policy]));
 
   return (
@@ -1276,6 +1293,10 @@ export function ProjectModelPolicyEditor({
       <div className="grid grid-cols-2 gap-2">
         {PROJECT_ROLES.map((role) => {
           const policy = policyByRole.get(role);
+          const runnable = selectableWorkflowProviders(providers, role);
+          const invalidCurrent = Boolean(policy) && !runnable.some(
+            (provider) => provider.id === policy?.providerId,
+          );
           return (
             <label key={role} className="block text-xs" data-testid="project-policy-row">
               <span className="mb-1 block" style={{ color: 'var(--text-secondary)' }}>{PROJECT_ROLE_LABELS[role]}</span>
@@ -1296,10 +1317,14 @@ export function ProjectModelPolicyEditor({
                 }}
               >
                 <option value="">跟随上级策略</option>
+                {invalidCurrent && policy ? (
+                  <option value={pairValue(policy.providerId, policy.modelId)} disabled>{AGENT_MODEL_RECONFIGURATION_MESSAGE}</option>
+                ) : null}
                 {runnable.flatMap((provider) => (modelsByProvider[provider.id] ?? []).map((model) => (
                   <option key={`${provider.id}:${model.modelId}`} value={pairValue(provider.id, model.modelId)}>{provider.name} / {model.modelId}</option>
                 )))}
               </select>
+              {invalidCurrent ? <span role="alert" className="mt-1 block text-[10px]" style={{ color: 'var(--warning)' }}>{AGENT_MODEL_RECONFIGURATION_MESSAGE}</span> : null}
             </label>
           );
         })}

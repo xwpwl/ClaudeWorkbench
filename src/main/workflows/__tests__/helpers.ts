@@ -20,6 +20,7 @@ import type {
   WorkflowEvent,
   WorkflowPersistence,
   WorkflowPersistenceExpectation,
+  WorkflowDependencies,
 } from '../contracts';
 
 export function clone<T>(value: T): T {
@@ -256,9 +257,7 @@ export interface ManagerFixture {
 
 export function managerFixture(options: {
   failCheckpointAt?: WorkflowCheckpointRequest['boundary'];
-  modelSelections?: {
-    snapshotWorkflowPolicy(input: unknown): WorkflowModelSelectionPolicy;
-  };
+  modelSelections?: WorkflowDependencies['modelSelections'];
 } = {}): ManagerFixture {
   const persistence = new MemoryWorkflowPersistence();
   const runner = new ScriptedRunner();

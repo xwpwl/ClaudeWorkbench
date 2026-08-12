@@ -44,6 +44,12 @@ export function registerSessionIPC(
   ipcMain: PublicIpcRegistrar,
   db: AppDatabase,
   historyAdapter: ClaudeLocalSessionAdapter,
+  dependencies: {
+    validateExecutableModel?: (request: {
+      projectId: string;
+      fallbackModelId: string | null;
+    }) => void | Promise<void>;
+  } = {},
 ): void {
   ipcMain.handle(
     IPC_CHANNELS.SESSION_CREATE,
@@ -56,6 +62,10 @@ export function registerSessionIPC(
       if (!db.getProject(projectId)) {
         throw new SessionCreateError('PROJECT_NOT_FOUND');
       }
+      await dependencies.validateExecutableModel?.({
+        projectId,
+        fallbackModelId: options?.model?.trim() || null,
+      });
       const id = crypto.randomUUID();
       const title = options?.systemPrompt?.trim().slice(0, 40) || '新任务';
       db.createSession(

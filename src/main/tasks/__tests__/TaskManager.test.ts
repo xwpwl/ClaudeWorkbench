@@ -56,6 +56,35 @@ function terminal(runOptions: ClaudeRunOptions): ClaudeEventEnvelope {
 }
 
 describe('TaskManager', () => {
+  it('revalidates runtime compatibility before locks, checkpoints, task events, or adapter execution', async () => {
+    const adapter = new AdapterStub();
+    const mutationEvents: FileMutationEvent[] = [];
+    const prepareRun = vi.fn(async () => {
+      throw Object.assign(new Error('runtime incompatible'), { code: 'RUNTIME_INCOMPATIBLE' });
+    });
+    const manager = new TaskManager(adapter, {
+      prepareRun,
+      fileMutations: new FileMutationManager({
+        recordEvent: (event) => { mutationEvents.push(event); },
+      }),
+    });
+    const checkpoint = vi.fn(async () => undefined);
+    const recordStart = vi.fn();
+    manager.subscribeBeforeRuns(checkpoint);
+    manager.subscribeStarts(recordStart);
+
+    await expect(manager.runPrompt(options())).rejects.toMatchObject({
+      code: 'RUNTIME_INCOMPATIBLE',
+    });
+
+    expect(prepareRun).toHaveBeenCalledOnce();
+    expect(adapter.runPrompt).not.toHaveBeenCalled();
+    expect(checkpoint).not.toHaveBeenCalled();
+    expect(recordStart).not.toHaveBeenCalled();
+    expect(mutationEvents).toEqual([]);
+    expect(manager.getActiveTasks()).toEqual([]);
+  });
+
   it('fails closed before spawning when bypassPermissions has no main-process authorizer', async () => {
     const adapter = new AdapterStub();
     const manager = new TaskManager(adapter);

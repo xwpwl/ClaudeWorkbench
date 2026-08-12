@@ -57,6 +57,24 @@ export class ModelRunOptionsResolver {
     });
     return applySelection(options, selection);
   }
+
+  /** Final TaskManager boundary: revalidate the immutable main-owned selection only. */
+  async revalidateResolved(options: Readonly<ClaudeRunOptions>): Promise<ClaudeRunOptions> {
+    const { taskId, projectId } = trustedIdentity(options);
+    const pinned = options.resolvedModelSelection;
+    if (!pinned) throw new Error('Trusted resolved model selection is required before execution.');
+    const workflow = options.workflowContext;
+    const selection = await this.selections.revalidatePinnedSelection(pinned, {
+      taskId,
+      projectId,
+      ...(workflow ? { agentType: workflowAgentType(workflow) } : {}),
+      use: workflow ? 'agent-workflow' : 'chat',
+    });
+    const trustedOptions = workflow
+      ? options
+      : enforceChatResumeBoundary(options, selection, this.sessionBindings);
+    return applySelection(trustedOptions, selection);
+  }
 }
 
 function trustedIdentity(options: Readonly<ClaudeRunOptions>): {

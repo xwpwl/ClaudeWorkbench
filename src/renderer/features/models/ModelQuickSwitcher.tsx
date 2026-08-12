@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useId, useRef } from 'react';
 import { ChevronDown, Cpu, LockKeyhole } from 'lucide-react';
 import {
   type ModelSelectionSource,
+  AGENT_MODEL_RECONFIGURATION_MESSAGE,
   type ProviderModelRef,
   type ResolvedModelSelection,
 } from '../../../shared/types/modelProviders';
@@ -149,7 +150,7 @@ export function ModelQuickSwitcher({
         title={`${t('model.switch.currentModel')}: ${label}`}
       >
         <Cpu size={13} style={{ color: 'var(--accent)', flexShrink: 0 }} />
-        <span className="min-w-0 truncate">{selection?.providerName ?? 'Claude Code'}</span>
+        <span className="min-w-0 truncate">{selection?.providerName ?? (error === AGENT_MODEL_RECONFIGURATION_MESSAGE ? '需要重新配置' : 'Claude Code')}</span>
         <span style={{ color: 'var(--text-tertiary)' }}>/</span>
         <span className="min-w-0 truncate">{selection?.modelId ?? t('model.switch.defaultModel')}</span>
         <ChevronDown size={12} className="shrink-0" />
@@ -212,7 +213,7 @@ export function ModelQuickSwitcher({
             </p>
           )}
 
-          {selection?.source === 'task_override' && onClearOverride ? (
+          {(selection?.source === 'task_override' || error === AGENT_MODEL_RECONFIGURATION_MESSAGE) && onClearOverride ? (
               <button
                 type="button"
                 data-testid="follow-model-policy"
@@ -281,6 +282,9 @@ export function ModelQuickSwitcher({
                   >
                     <span className="font-medium">{option.providerName}</span>
                     <span style={{ color: 'var(--text-tertiary)' }}> / {option.modelId}</span>
+                  </span>
+                  <span className="mt-1 block text-[10px]" style={{ color: 'var(--text-tertiary)' }}>
+                    {t('model.switch.optionPurpose')} · {t('model.switch.optionSource')}
                   </span>
                 </button>
               );

@@ -155,10 +155,26 @@ describe('ModelProviderCenterView', () => {
       supportedUses: [], defaultModelId: 'deepseek-chat',
     });
     const html = viewMarkup({ providers: [deepSeek], selectedProviderId: deepSeek.id, selectedProvider: deepSeek, models: [] });
-    expect(html).toContain('可管理和测试连接，但不能运行 Claude Code Agent 任务');
+    expect(html).toContain('已配置，可测试；当前不支持 Claude Code Agent。');
     expect(html).toContain('当前 Provider 不支持 Claude Code Agent Runtime');
     expect(html).toContain('data-testid="test-provider"');
     expect(html).not.toContain('data-testid="set-default-provider"');
+  });
+
+  it('marks a legacy management-only default as needing reconfiguration', () => {
+    const deepSeek = provider({
+      id: 'deepseek', name: 'DeepSeek', type: 'openai-compatible',
+      apiFormat: 'openai-chat-completions', runtimeType: 'none', isDefault: true,
+      agentModelStatus: 'needs_reconfiguration',
+      capabilities: { ...capabilities, supportsClaudeCode: false, supportsAgentWorkflow: false, supportsMCP: false },
+      supportedUses: [], defaultModelId: 'deepseek-chat',
+    });
+    const html = viewMarkup({
+      providers: [deepSeek], selectedProviderId: deepSeek.id,
+      selectedProvider: deepSeek, models: [],
+    });
+    expect(html).toContain('需要重新配置');
+    expect(html).toContain('该模型当前不能用于 Agent，请重新选择。');
   });
 
   it('keeps connected OpenAI Providers available for management and connection tests', () => {
@@ -450,6 +466,42 @@ describe('AgentModelPolicyEditor', () => {
     expect(html).not.toContain('DeepSeek /');
   });
 
+  it('preserves a legacy invalid role value and marks it for reconfiguration', () => {
+    const deepSeek = provider({
+      id: 'deepseek', name: 'DeepSeek', runtimeType: 'none',
+      agentModelStatus: 'needs_reconfiguration',
+      capabilities: { ...capabilities, supportsClaudeCode: false, supportsAgentWorkflow: false },
+    });
+    const invalidAssignments: AgentModelPolicyAssignment[] = [{
+      agentType: 'planner', providerId: 'deepseek', modelId: 'deepseek-chat',
+      notes: { quality: null, speed: null, cost: null },
+    }];
+    const html = renderToStaticMarkup(React.createElement(AgentModelPolicyEditor, {
+      providers: [deepSeek, provider()], modelsByProvider: { deepseek: [], mimo: models },
+      assignments: invalidAssignments, onChange: noop,
+    }));
+
+    expect(html).toContain('该模型当前不能用于 Agent，请重新选择。');
+    expect(html).toContain('value="deepseek:deepseek-chat"');
+    expect(html).not.toContain('DeepSeek / deepseek-chat');
+  });
+
+  it('filters tools/MCP by role while keeping Planner and Reviewer workflow choices', () => {
+    const workflowOnly = provider({
+      id: 'workflow-only',
+      name: 'Workflow Only',
+      capabilities: { ...capabilities, supportsTools: false, supportsMCP: false },
+      agentModelStatus: 'needs_reconfiguration',
+    });
+    const html = renderToStaticMarkup(React.createElement(AgentModelPolicyEditor, {
+      providers: [workflowOnly],
+      modelsByProvider: { 'workflow-only': [{ ...models[0], providerId: 'workflow-only' }] },
+      assignments: [], onChange: noop,
+    }));
+
+    expect((html.match(/Workflow Only \/ mimo-v2\.5-pro/gu) ?? [])).toHaveLength(2);
+  });
+
   it('persists policy notes through the dedicated policy API shape', async () => {
     const setPolicy = vi.fn(async (input) => ({ ...input, notes: { quality: input.quality, speed: input.speed, cost: input.cost }, createdAt: 1, updatedAt: 1 }));
     const deletePolicy = vi.fn(async () => true);
@@ -509,6 +561,22 @@ describe('ProjectModelPolicyEditor', () => {
     }));
     expect(html).not.toContain('DeepSeek /');
     expect(html).toContain('MiMo / mimo-v2.5-pro');
+  });
+
+  it('shows an invalid project policy as needs-reconfiguration instead of following silently', () => {
+    const deepSeek = provider({
+      id: 'deepseek', name: 'DeepSeek', runtimeType: 'none',
+      agentModelStatus: 'needs_reconfiguration',
+      capabilities: { ...capabilities, supportsClaudeCode: false, supportsAgentWorkflow: false },
+    });
+    const html = renderToStaticMarkup(React.createElement(ProjectModelPolicyEditor, {
+      providers: [deepSeek, provider()], modelsByProvider: { deepseek: [], mimo: models },
+      policies: [{ ...projectPolicies[0], providerId: 'deepseek', modelId: 'deepseek-chat' }],
+      busy: false, onChange: noop,
+    }));
+
+    expect(html).toContain('该模型当前不能用于 Agent，请重新选择。');
+    expect(html).toContain('value="deepseek:deepseek-chat"');
   });
 
   it('uses dedicated project policy set and delete shapes', async () => {

@@ -4,6 +4,7 @@ import type {
   ResolvedModelSelection,
   TaskModelSwitchResult,
 } from '../../../shared/types/modelProviders';
+import { AGENT_MODEL_RECONFIGURATION_MESSAGE as RECONFIGURE_AGENT_MODEL } from '../../../shared/types/modelProviders';
 import type { TaskModelSwitchOptionPublic } from '../../../shared/types/projectAi';
 import { t } from '../../i18n';
 
@@ -15,7 +16,7 @@ export interface TaskModelToolbarPort {
 }
 
 export interface TaskModelToolbarData {
-  selection: ResolvedModelSelection;
+  selection: ResolvedModelSelection | null;
   options: TaskModelSwitchOptionPublic[];
   error: string | null;
 }
@@ -106,6 +107,8 @@ function safeTaskOption(value: TaskModelSwitchOptionPublic): TaskModelSwitchOpti
     modelId: value.modelId,
     modelDisplayName: value.modelDisplayName,
     runtimeType: value.runtimeType,
+    purpose: value.purpose ?? 'task_agent_override',
+    source: value.source ?? 'configured_provider',
   };
 }
 
@@ -113,15 +116,39 @@ export async function loadTaskModelToolbar(
   api: TaskModelToolbarPort,
   taskId: string,
 ): Promise<TaskModelToolbarData> {
-  const [selection, options] = await Promise.all([
-    api.getEffectiveModelSelection({ taskId }),
+  const [selectionResult, options] = await Promise.all([
+    api.getEffectiveModelSelection({ taskId })
+      .then((selection) => ({ selection, error: null }))
+      .catch((error: unknown) => {
+        if (!isAgentConfigurationFailure(error)) throw error;
+        return { selection: null, error: RECONFIGURE_AGENT_MODEL };
+      }),
     api.listTaskModelSwitchOptions({ taskId }),
   ]);
   return {
-    selection,
+    selection: selectionResult.selection,
     options: options.map(safeTaskOption),
-    error: null,
+    error: selectionResult.error,
   };
+}
+
+function isAgentConfigurationFailure(error: unknown): boolean {
+  const code = error && typeof error === 'object' && 'code' in error
+    ? (error as { code?: unknown }).code
+    : null;
+  return typeof code === 'string' && [
+    'TIER_UNBOUND',
+    'PROVIDER_DELETED',
+    'PROVIDER_DISABLED',
+    'PROVIDER_UNCONFIGURED',
+    'CONNECTION_UNAVAILABLE',
+    'MODEL_MISSING',
+    'RUNTIME_INCOMPATIBLE',
+    'WORKFLOW_CAPABILITY_MISSING',
+    'SOURCE_CHANGED',
+    'CLAUDE_CLI_UNAVAILABLE',
+    'SELECTION_UNAVAILABLE',
+  ].includes(code);
 }
 
 export async function switchTaskModel(

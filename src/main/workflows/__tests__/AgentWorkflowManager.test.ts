@@ -374,6 +374,59 @@ describe('AgentWorkflowManager creation and plan confirmation', () => {
     expect(workflow).not.toHaveProperty('modelSelectionPolicy');
   });
 
+  it('creates no Workflow when the main-process model snapshot rejects the runtime', async () => {
+    const snapshotWorkflowPolicy = vi.fn(() => {
+      throw Object.assign(new Error('runtime incompatible'), { code: 'RUNTIME_INCOMPATIBLE' });
+    });
+    const fixture = managerFixture({ modelSelections: { snapshotWorkflowPolicy } });
+
+    await expect(fixture.manager.createWorkflow({
+      id: 'deepseek-workflow', taskId: 'task', projectId: 'project',
+      projectPath: 'C:/repo', prompt: 'Goal', currentPermissionMode: 'default',
+    })).rejects.toMatchObject({ code: 'RUNTIME_INCOMPATIBLE' });
+    expect(fixture.persistence.creates).toBe(0);
+    expect(fixture.persistence.listStageRecords('deepseek-workflow')).toEqual([]);
+    expect(fixture.checkpoints).toEqual([]);
+    expect(fixture.runner.requests).toEqual([]);
+    expect(fixture.events).toEqual([]);
+  });
+
+  it('revalidates a frozen Provider before writing a Stage or Checkpoint', async () => {
+    const policy = modelSelectionPolicy();
+    const revalidatePinnedSelection = vi.fn(() => {
+      throw Object.assign(new Error('runtime incompatible'), { code: 'RUNTIME_INCOMPATIBLE' });
+    });
+    const fixture = managerFixture({
+      modelSelections: {
+        snapshotWorkflowPolicy: () => policy,
+        revalidatePinnedSelection,
+      },
+    });
+    await fixture.manager.createWorkflow({
+      id: 'stale-provider', taskId: 'task', projectId: 'project',
+      projectPath: 'C:/repo', prompt: 'Goal', currentPermissionMode: 'default',
+    });
+
+    const result = await fixture.manager.startPlanning('stale-provider');
+
+    expect(result).toMatchObject({
+      status: 'failed',
+      failure: {
+        stage: 'planner',
+        code: 'RUNTIME_INCOMPATIBLE',
+        message: '该模型当前不能用于 Agent，请重新选择。',
+      },
+    });
+    expect(revalidatePinnedSelection).toHaveBeenCalledWith(
+      policy.planner,
+      expect.objectContaining({ agentType: 'planner', use: 'agent-workflow' }),
+    );
+    expect(fixture.persistence.listStageRecords('stale-provider')).toEqual([]);
+    expect(fixture.checkpoints).toEqual([]);
+    expect(fixture.runner.requests).toEqual([]);
+    expect(fixture.events.map((event) => event.type)).not.toContain('workflow_stage_started');
+  });
+
   it('keeps legacy workflow creation compatible when no snapshot resolver is wired', async () => {
     const fixture = managerFixture();
     await fixture.manager.createWorkflow({

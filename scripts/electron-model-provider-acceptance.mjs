@@ -23,6 +23,8 @@ const MIMO_REVIEW_MODEL = 'mimo-v2.5-review';
 const DEEPSEEK_NAME = 'DeepSeek';
 const DEEPSEEK_MODEL = 'deepseek-chat';
 const UNSUPPORTED_RUNTIME_MESSAGE = '当前 Provider 不支持 Claude Code Agent Runtime';
+const PROVIDER_RUNTIME_NOT_RUNNABLE_MESSAGE =
+  '当前 Provider 可以管理和测试，但尚不能用于 Claude Code Agent。请选择支持 Claude Code Runtime 的 Provider。';
 const FUTURE_CALLS_WARNING = '模型改变只影响后续 Agent 调用。';
 const RUNNING_SWITCH_WARNING = '正在运行任务时禁止切换模型。';
 const REPORT_DEFAULT = path.join(WORKSPACE_ROOT, 'dist', 'model-provider-acceptance-report.json');
@@ -282,7 +284,7 @@ function reservePort() {
   });
 }
 
-async function readRequestBody(request, limit = 64 * 1024) {
+async function readRequestBody(request, limit = 1024 * 1024) {
   const chunks = [];
   let size = 0;
   for await (const chunk of request) {
@@ -293,6 +295,28 @@ async function readRequestBody(request, limit = 64 * 1024) {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+function writeAnthropicTextStream(response, model, text) {
+  const messageId = `msg_${crypto.randomUUID().replace(/-/gu, '')}`;
+  const events = [
+    ['message_start', { type: 'message_start', message: {
+      id: messageId, type: 'message', role: 'assistant', model, content: [], stop_reason: null,
+      stop_sequence: null, usage: { input_tokens: 11, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    } }],
+    ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }],
+    ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } }],
+    ['content_block_stop', { type: 'content_block_stop', index: 0 }],
+    ['message_delta', { type: 'message_delta', delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 1 } }],
+    ['message_stop', { type: 'message_stop' }],
+  ];
+  response.writeHead(200, {
+    'content-type': 'text/event-stream; charset=utf-8',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+  });
+  for (const [event, data] of events) response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  response.end();
+}
+
 async function startProviderServer(mimoSecret, deepSeekSecret) {
   const requests = [];
   const server = http.createServer(async (request, response) => {
@@ -301,7 +325,9 @@ async function startProviderServer(mimoSecret, deepSeekSecret) {
     try {
       if (request.method === 'POST' && pathname === '/anthropic/v1/messages') {
         const body = JSON.parse(await readRequestBody(request));
-        const credentialMatched = request.headers.authorization === `Bearer ${mimoSecret}`;
+        const suppliedSecret = request.headers['x-api-key']
+          ?? request.headers.authorization?.replace(/^Bearer\s+/iu, '');
+        const credentialMatched = suppliedSecret === mimoSecret;
         requests.push({
           method: request.method,
           pathname,
@@ -311,10 +337,24 @@ async function startProviderServer(mimoSecret, deepSeekSecret) {
           startedAt,
         });
         await new Promise((resolve) => setTimeout(resolve, 30));
-        response.writeHead(credentialMatched ? 200 : 401, { 'content-type': 'application/json' });
-        response.end(JSON.stringify(credentialMatched
-          ? { id: `msg_${crypto.randomUUID()}`, type: 'message', role: 'assistant', content: [] }
-          : { error: { type: 'authentication_error' } }));
+        if (!credentialMatched) {
+          response.writeHead(401, { 'content-type': 'application/json' });
+          response.end(JSON.stringify({ error: { type: 'authentication_error' } }));
+        } else if (body.stream === true) {
+          writeAnthropicTextStream(response, typeof body.model === 'string' ? body.model : MIMO_MODEL, 'OK');
+        } else {
+          response.writeHead(200, { 'content-type': 'application/json' });
+          response.end(JSON.stringify({
+            id: `msg_${crypto.randomUUID()}`,
+            type: 'message',
+            role: 'assistant',
+            model: typeof body.model === 'string' ? body.model : MIMO_MODEL,
+            content: [{ type: 'text', text: 'OK' }],
+            stop_reason: 'end_turn',
+            stop_sequence: null,
+            usage: { input_tokens: 11, output_tokens: 1 },
+          }));
+        }
         return;
       }
       if (request.method === 'GET' && pathname === '/openai/models') {
@@ -564,6 +604,13 @@ async function selectProviderInUi(client, name) {
     return true;
   })()`);
   assert(selected, `Provider list item was not found: ${name}`);
+  const expanded = await client.evaluate(`(() => {
+    const details = document.querySelector('[data-testid="provider-advanced-details"]');
+    if (!(details instanceof HTMLDetailsElement)) return false;
+    details.open = true;
+    return true;
+  })()`);
+  assert(expanded, `${name} Provider advanced details could not be expanded.`);
   await client.waitFor(
     `document.querySelector('[data-testid="model-provider-details"]')?.innerText.includes(${js(name)})`,
     { description: `${name} Provider details` },
@@ -588,8 +635,8 @@ async function openModelProviderCenter(client) {
 
 async function closeSettings(client) {
   const closed = await client.evaluate(`(() => {
-    const center = document.querySelector('[data-testid="model-provider-center"]');
-    const overlay = center?.closest('.fixed.inset-0');
+    const body = document.querySelector('[data-testid="settings-body"]');
+    const overlay = body?.closest('.fixed.inset-0');
     const header = overlay?.firstElementChild?.firstElementChild;
     const button = header?.querySelector('button');
     if (!button) return false;
@@ -597,7 +644,7 @@ async function closeSettings(client) {
     return true;
   })()`);
   assert(closed, 'Settings close button was not found.');
-  await client.waitFor(`!document.querySelector('[data-testid="model-provider-center"]')`, {
+  await client.waitFor(`!document.querySelector('[data-testid="settings-body"]')`, {
     description: 'Settings dialog close',
   });
 }
@@ -628,8 +675,9 @@ async function setSelectByAriaLabel(client, label, value) {
 
 async function setAgentPolicyThroughUi(client, providerId, modelId, role, notes) {
   const pair = `${encodeURIComponent(providerId)}:${encodeURIComponent(modelId)}`;
+  const noteLabels = { quality: '质量', speed: '速度', cost: '成本' };
   await client.waitFor(
-    `!document.querySelector(${js(`select[aria-label="${role} 模型"]`)})?.disabled`,
+    `(() => { const element = document.querySelector(${js(`select[aria-label="${role} 模型"]`)}); return Boolean(element && !element.disabled); })()`,
     { description: `${role} policy selector enabled` },
   );
   await setSelectByAriaLabel(client, `${role} 模型`, pair);
@@ -641,11 +689,13 @@ async function setAgentPolicyThroughUi(client, providerId, modelId, role, notes)
     { description: `${role} Agent policy persistence` },
   );
   for (const [field, value] of Object.entries(notes)) {
+    const fieldLabel = noteLabels[field];
+    assert(fieldLabel, `Unknown Agent policy note field: ${field}`);
     await client.waitFor(
-      `!document.querySelector(${js(`select[aria-label="${role} ${field}"]`)})?.disabled`,
+      `(() => { const element = document.querySelector(${js(`select[aria-label="${role} ${fieldLabel}"]`)}); return Boolean(element && !element.disabled); })()`,
       { description: `${role} ${field} note enabled` },
     );
-    await setSelectByAriaLabel(client, `${role} ${field}`, value);
+    await setSelectByAriaLabel(client, `${role} ${fieldLabel}`, value);
   }
   await client.waitFor(
     `(async () => (await window.api.listAgentModelPolicies())
@@ -680,6 +730,17 @@ function addFixtureModel(databasePath, providerId, modelId, displayName) {
         (provider_id, model_id, display_name, source, created_at, updated_at)
       VALUES (?, ?, ?, 'manual', ?, ?)
     `).run(providerId, modelId, displayName, now, now);
+  } finally {
+    database.close();
+  }
+}
+
+function executionSideEffectCounts(databasePath) {
+  const database = new BetterSqlite3(databasePath, { readonly: true, fileMustExist: true });
+  try {
+    return Object.fromEntries([
+      'sessions', 'tasks', 'events', 'checkpoints', 'workflows', 'workflow_steps',
+    ].map((table) => [table, database.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count]));
   } finally {
     database.close();
   }
@@ -1157,11 +1218,18 @@ function deleteBoundDiagnosticsCandidate(candidate) {
 }
 
 function cleanupReturnedDiagnosticsOnFailure(exportResult, context) {
-  if (!exportResult || exportResult.status !== 'fulfilled'
-    || typeof exportResult.value !== 'string' || exportResult.value.trim().length === 0) {
+  if (!exportResult || exportResult.status !== 'fulfilled' || exportResult.value !== true) {
     return { deleted: false, reason: 'No fulfilled explicit diagnostics path was returned.' };
   }
-  const inspected = inspectExactDiagnosticsCandidate(exportResult.value, context);
+  const newNames = fs.readdirSync(context.outputDirectory)
+    .filter((name) => !context.existingNames.has(name) && diagnosticsArchiveCreatedAt(name) !== null);
+  if (newNames.length !== 1) {
+    return { deleted: false, reason: `Expected one fresh diagnostics file, found ${newNames.length}.` };
+  }
+  const inspected = inspectExactDiagnosticsCandidate(
+    path.join(context.outputDirectory, newNames[0]),
+    context,
+  );
   if (!inspected.ok) return { deleted: false, reason: inspected.reason };
   return deleteBoundDiagnosticsCandidate(inspected.candidate);
 }
@@ -1180,7 +1248,10 @@ async function exportDiagnosticsThroughProductionDialog(client, outputDirectory,
   let exportResult;
   try {
     const helper = runPowerShellEncoded(buildNativeDialogAutomationScript(electronProcessId));
-    const exportPromise = client.evaluate('window.api.exportDiagnostics()', { timeoutMs: NATIVE_DIALOG_EXPORT_TIMEOUT_MS });
+    const exportPromise = client.evaluate(
+      'window.api.exportDiagnostics({ includeAnonymousPerformanceData: false })',
+      { timeoutMs: NATIVE_DIALOG_EXPORT_TIMEOUT_MS },
+    );
     const settled = await Promise.allSettled([
       awaitChild(helper, NATIVE_DIALOG_CHILD_TIMEOUT_MS),
       exportPromise,
@@ -1189,7 +1260,14 @@ async function exportDiagnosticsThroughProductionDialog(client, outputDirectory,
     exportResult = settled[1];
     if (helperResult.status === 'rejected') throw helperResult.reason;
     if (exportResult.status === 'rejected') throw exportResult.reason;
-    const inspected = inspectExactDiagnosticsCandidate(exportResult.value, cleanupContext);
+    assert(exportResult.value === true, 'Diagnostics export did not report success.');
+    const newNames = fs.readdirSync(resolvedDirectory)
+      .filter((name) => !existingNames.has(name) && diagnosticsArchiveCreatedAt(name) !== null);
+    assert(newNames.length === 1, `Expected one fresh diagnostics archive, found ${newNames.length}.`);
+    const inspected = inspectExactDiagnosticsCandidate(
+      path.join(resolvedDirectory, newNames[0]),
+      cleanupContext,
+    );
     assert(inspected.ok, `Diagnostics export path was not safe: ${inspected.reason}`);
     return {
       exportedPath: inspected.candidate.filePath,
@@ -1298,9 +1376,10 @@ async function main() {
       nodeEnv: 'production',
       devServerUsed: false,
       fakeClaudeRuntime: false,
+      fakeModelTransport: true,
       runtime: 'ClaudeCliAdapter',
       billedModelTaskStarted: false,
-      note: 'The production app is wired to the real ClaudeCliAdapter; Provider connections use real loopback HTTP and this acceptance starts no billed model task.',
+      note: 'The production app runs the real ClaudeCliAdapter against an authenticated loopback fake model transport; no billed model task is started.',
       build: [],
       sourceEvidence: [],
       launches: [],
@@ -1430,15 +1509,67 @@ async function main() {
         `(async () => (await window.api.listModelProviderModels(${js(mimo.id)})).length === 3)()`,
         { description: 'three MiMo role models' },
       );
-      await instance.client.waitFor(
-        `Array.from(document.querySelector('select[aria-label="Planner 模型"]')?.options ?? [])
-          .some((option) => option.value.endsWith(${js(`:${encodeURIComponent(MIMO_REVIEW_MODEL)}`)}))`,
-        { description: 'distinct MiMo models in Agent policy UI' },
-      );
       return {
         providerId: mimo.id,
         modelIds: [MIMO_MODEL, MIMO_FAST_MODEL, MIMO_REVIEW_MODEL],
         connectionLatencyMs: connection.latencyMs,
+      };
+    });
+
+    await runStep(report, 'Run a minimal MiMo Agent task through the production Claude Runtime', async () => {
+      const beforeRequests = providerServer.requests.length;
+      const runId = `model-provider-mimo-${crypto.randomUUID()}`;
+      const evidence = await instance.client.evaluate(`new Promise((resolve) => {
+        const events = [];
+        let settled = false;
+        const finish = (value) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          unsubscribe();
+          resolve(value);
+        };
+        const unsubscribe = window.api.onClaudeEvent((envelope) => {
+          if (envelope.runId !== ${js(runId)}) return;
+          events.push(envelope.event.type);
+          if (envelope.event.type === 'session_completed') finish({ ok: true, events });
+          if (envelope.event.type === 'session_failed') finish({
+            ok: false, events, error: envelope.event.error
+          });
+        });
+        const timeout = setTimeout(() => {
+          void window.api.stopRun(${js(runId)}).finally(() => finish({
+            ok: false, events, error: 'timeout'
+          }));
+        }, 45000);
+        void window.api.runPrompt({
+          runId: ${js(runId)},
+          projectKey: ${js(fixture.projectPath)},
+          sessionKey: ${js(`${fixture.projectPath}::${TASK_ID}`)},
+          projectPath: ${js(fixture.projectPath)},
+          prompt: 'Reply with OK only.',
+          model: ${js(MIMO_MODEL)},
+          permissionMode: 'plan',
+          agentMode: 'plan',
+          disallowedTools: []
+        }).catch((error) => finish({ ok: false, events, error: error?.message ?? String(error) }));
+      })`);
+      assert(evidence.ok, `MiMo production Agent task failed: ${evidence.error ?? 'unknown'}`);
+      const runtimeRequests = providerServer.requests.slice(beforeRequests)
+        .filter((request) => request.pathname === '/anthropic/v1/messages');
+      assert(runtimeRequests.length >= 1
+        && runtimeRequests.every((request) => request.credentialMatched)
+        && runtimeRequests.some((request) => request.model === MIMO_MODEL),
+      'MiMo Agent task did not enter the Claude Runtime with the selected Provider/model.');
+      assert(evidence.events.includes('session_started') || evidence.events.includes('system_init'),
+        'MiMo Agent task did not emit a Claude Runtime initialization event.');
+      return {
+        runId,
+        runtime: 'claude-code',
+        providerId: mimo.id,
+        modelId: MIMO_MODEL,
+        events: evidence.events,
+        authenticatedRequests: runtimeRequests.length,
       };
     });
 
@@ -1461,17 +1592,54 @@ async function main() {
       assert(details.text.includes(UNSUPPORTED_RUNTIME_MESSAGE), 'DeepSeek missing the unsupported Runtime warning.');
       assert(details.text.includes('deepseek-reasoner'), 'DeepSeek /models discovery was not displayed.');
       assert(!details.hasDefaultButton, 'DeepSeek incorrectly exposes a default Runtime action.');
+      const beforeRejection = executionSideEffectCounts(fixture.databasePath);
+      const forged = await instance.client.evaluate(`(async () => {
+        const validation = await window.api.validateModelProviderDraft({
+          providerId: ${js(result.provider.id)},
+          name: ${js(DEEPSEEK_NAME)},
+          type: 'openai-compatible',
+          apiFormat: 'openai-chat-completions',
+          baseUrlIntent: { mode: 'preserve_existing' },
+          credential: null,
+          defaultModelId: ${js(DEEPSEEK_MODEL)},
+          capabilities: {
+            supportsClaudeCode: true,
+            supportsAgentWorkflow: true,
+            supportsTools: true,
+            supportsMCP: true
+          }
+        });
+        await window.api.updateModelProvider({
+          providerId: ${js(result.provider.id)}, validationToken: validation.validationToken
+        });
+        return window.api.getModelProvider(${js(result.provider.id)});
+      })()`);
+      assert(forged.runtimeType === 'none'
+        && forged.capabilities.supportsClaudeCode === false
+        && forged.capabilities.supportsAgentWorkflow === false,
+      'Renderer capability forgery promoted DeepSeek runtime facts.');
       const rejectedDefault = await instance.client.evaluate(`window.api.setDefaultModelProvider(${js(result.provider.id)})
-        .then(() => ({ ok: true, error: '' }))
-        .catch((error) => ({ ok: false, error: String(error) }))`);
-      assert(!rejectedDefault.ok && rejectedDefault.error.includes(UNSUPPORTED_RUNTIME_MESSAGE), 'DeepSeek was incorrectly accepted as the default Runtime.');
+        .then(() => ({ ok: true, code: '', message: '' }))
+        .catch((error) => ({ ok: false, code: error?.code ?? '', message: error?.message ?? String(error) }))`);
+      assert(!rejectedDefault.ok
+        && rejectedDefault.code === 'PROVIDER_RUNTIME_NOT_RUNNABLE'
+        && rejectedDefault.message === PROVIDER_RUNTIME_NOT_RUNNABLE_MESSAGE,
+      'DeepSeek default rejection did not use the stable public code and message.');
+      const defaults = await instance.client.evaluate(`window.api.listModelProviders({ limit: 100, offset: 0 })`);
+      assert(defaults.items.some((provider) => provider.id === mimo.id && provider.isDefault)
+        && defaults.items.some((provider) => provider.id === result.provider.id && !provider.isDefault),
+      'DeepSeek rejection wrote an invalid default or silently changed the valid default.');
       const rejectedPolicy = await instance.client.evaluate(`window.api.setAgentModelPolicy({
         agentType: 'planner',
         providerId: ${js(result.provider.id)},
         modelId: ${js(DEEPSEEK_MODEL)},
         quality: 'high', speed: 'high', cost: 'low'
-      }).then(() => ({ ok: true, error: '' })).catch((error) => ({ ok: false, error: String(error) }))`);
-      assert(!rejectedPolicy.ok && rejectedPolicy.error.includes(UNSUPPORTED_RUNTIME_MESSAGE), 'DeepSeek was incorrectly accepted for Agent Workflow.');
+      }).then(() => ({ ok: true, code: '', message: '' }))
+        .catch((error) => ({ ok: false, code: error?.code ?? '', message: error?.message ?? String(error) }))`);
+      assert(!rejectedPolicy.ok && rejectedPolicy.code === 'RUNTIME_INCOMPATIBLE',
+        'DeepSeek was incorrectly accepted for Agent Workflow.');
+      assert(JSON.stringify(executionSideEffectCounts(fixture.databasePath)) === JSON.stringify(beforeRejection),
+        'DeepSeek rejection created a Session, Task run, Workflow Stage, event, or Checkpoint.');
       report.screenshots.push(await captureScreenshot(
         instance.client,
         screenshotRoot,
@@ -1483,15 +1651,25 @@ async function main() {
         runtimeType: result.provider.runtimeType,
         discoveredModels: await instance.client.evaluate(`window.api.listModelProviderModels(${js(result.provider.id)})`),
         defaultRejected: true,
+        defaultErrorCode: rejectedDefault.code,
+        forgedCapabilitiesRejected: true,
+        executionSideEffectsCreated: false,
+        claudeCliAdapterCalls: 0,
         agentPolicyRejected: true,
         exactWarningVisible: true,
       };
     });
 
     await runStep(report, 'Configure Agent policies and informational notes through UI', async () => {
+      await clickVisibleText(instance.client, 'Agent');
       await instance.client.waitFor(`Boolean(document.querySelector('[data-testid="agent-model-policy-editor"]'))`, {
         description: 'Agent Model Policy editor',
       });
+      await instance.client.waitFor(
+        `Array.from(document.querySelector('select[aria-label="Planner 模型"]')?.options ?? [])
+          .some((option) => option.value.endsWith(${js(`:${encodeURIComponent(MIMO_REVIEW_MODEL)}`)}))`,
+        { description: 'distinct MiMo models in Agent policy UI' },
+      );
       const deepSeekAbsent = await instance.client.evaluate(`(() => Array.from(
         document.querySelectorAll('[data-testid="agent-model-policy-editor"] select[aria-label$="模型"]')
       ).every((select) => !Array.from(select.options).some((option) => option.text.includes(${js(DEEPSEEK_NAME)}))))()`);
@@ -1746,7 +1924,11 @@ async function main() {
       const identifiers = privateCredentialIdentifiers(fixture);
       capturedIdentifiers = identifiers;
       assert(identifiers.refs.length === 2, `Expected two credential references, found ${identifiers.refs.length}.`);
-      assert(identifiers.vaultFiles.length === 2, `Expected two encrypted vault files, found ${identifiers.vaultFiles.length}.`);
+      const providerVaultFiles = new Set(identifiers.records.map((record) => record.vaultFile));
+      assert([...providerVaultFiles].every((fileName) => identifiers.vaultFiles.includes(fileName)),
+        'A Provider credential reference has no encrypted vault file.');
+      assert(identifiers.vaultFiles.length === identifiers.refs.length + 1,
+        `Expected two Provider vault files and one internal signing key, found ${identifiers.vaultFiles.length}.`);
       for (const fileName of identifiers.vaultFiles) {
         const bytes = fs.readFileSync(path.join(identifiers.vaultPath, fileName));
         assert(!bytes.includes(Buffer.from(mimoSecret)), 'MiMo key exists in plaintext in the credential vault.');

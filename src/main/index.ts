@@ -381,15 +381,6 @@ async function initializeServices(): Promise<void> {
     credentialStore,
     providerEnvironmentResolver,
   );
-  const modelProviderService = new ModelProviderService({
-    persistence: providerRepository,
-    credentialStore,
-    connectionTester: providerConnectionTester,
-    isProviderInUse: (providerId) => taskManager?.getActiveTasks()
-      .some((active) => active.modelProviderId === providerId) ?? false,
-  });
-  await modelProviderService.retryCredentialCleanup();
-
   const realAdapter = new ClaudeCliAdapter({
     permissionBroker,
     permissionMcpPath: path.join(__dirname, 'permission-mcp.js'),
@@ -465,6 +456,17 @@ async function initializeServices(): Promise<void> {
     ),
     tierResolver: modelTierService,
   });
+  const modelProviderService = new ModelProviderService({
+    persistence: providerRepository,
+    credentialStore,
+    connectionTester: providerConnectionTester,
+    isProviderInUse: (providerId) => taskManager?.getActiveTasks()
+      .some((active) => active.modelProviderId === providerId) ?? false,
+    validateAgentDefault: (providerId, modelId) => {
+      modelSelectionResolver.assertProviderModelRunnable(providerId, modelId, 'coder');
+    },
+  });
+  await modelProviderService.retryCredentialCleanup();
   const modelRunOptionsResolver = new ModelRunOptionsResolver(modelSelectionResolver, db);
   const agentModelPolicyService = new AgentModelPolicyService({
     store: providerRepository,
@@ -489,6 +491,7 @@ async function initializeServices(): Promise<void> {
   taskManager = new TaskManager(baseAdapter, {
     fileMutations,
     dangerousRunAuthorizer: permissionAudit,
+    prepareRun: (options) => modelRunOptionsResolver.revalidateResolved(options),
   });
   claudeAdapter = taskManager;
   checkpointManager = new CheckpointManager(db, path.join(dataRoot, 'checkpoints'), {
@@ -606,7 +609,11 @@ async function initializeServices(): Promise<void> {
     getTrustedFrameUrl: trustedRendererUrl,
   };
   registerProjectIPC(publicIpcMain, db, { firstRunService, ...trustedRenderer });
-  registerSessionIPC(publicIpcMain, db, historyAdapter);
+  registerSessionIPC(publicIpcMain, db, historyAdapter, {
+    validateExecutableModel: async ({ projectId, fallbackModelId }) => {
+      await modelSelectionResolver.resolve({ projectId, fallbackModelId, use: 'chat' });
+    },
+  });
   disposeTerminals = registerTerminalIPC(publicIpcMain, {
     supervisor: processSupervisor,
     resolveProjectPath: (requestedPath) => {

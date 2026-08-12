@@ -224,11 +224,13 @@ describe('model provider contracts', () => {
     const serialized = JSON.stringify(projected);
 
     expect(projected.supportedUses).toEqual(['chat', 'agent_task', 'claude_code', 'mcp_tools']);
+    expect(projected.agentModelStatus).toBe('valid');
     expect(serialized).not.toContain('sentinel');
     expect(serialized).not.toContain('credentialRef');
     expect(serialized).not.toContain('apiKey');
     expect(Object.keys(projected).sort()).toEqual(
       [
+        'agentModelStatus',
         'apiFormat',
         'baseUrl',
         'baseUrlPathRedacted',

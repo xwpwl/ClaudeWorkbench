@@ -34,6 +34,8 @@ export interface DangerousRunAuthorizer {
 export interface TaskManagerOptions {
   fileMutations?: FileMutationManager;
   dangerousRunAuthorizer?: DangerousRunAuthorizer;
+  /** Revalidates the main-owned model snapshot before any run side effect. */
+  prepareRun?: (options: Readonly<ClaudeRunOptions>) => Promise<ClaudeRunOptions>;
 }
 
 export interface ProjectMutationOptions {
@@ -113,6 +115,7 @@ export class TaskManager implements ClaudeAdapter {
   private readonly terminalFinalizers = new Set<(envelope: ClaudeEventEnvelope) => Promise<void>>();
   private readonly fileMutations: FileMutationManager;
   private readonly dangerousRunAuthorizer?: DangerousRunAuthorizer;
+  private readonly prepareRun?: TaskManagerOptions['prepareRun'];
   private readonly terminalWork = new Map<string, Promise<void>>();
   private readonly completionWaiters = new Map<string, Set<() => void>>();
   private readonly unsubscribeAdapter: () => void;
@@ -121,6 +124,7 @@ export class TaskManager implements ClaudeAdapter {
     this.adapter = adapter;
     this.fileMutations = options.fileMutations ?? new FileMutationManager();
     this.dangerousRunAuthorizer = options.dangerousRunAuthorizer;
+    this.prepareRun = options.prepareRun;
     this.unsubscribeAdapter = adapter.subscribe((envelope) => this.handleEvent(envelope));
   }
 
@@ -129,6 +133,7 @@ export class TaskManager implements ClaudeAdapter {
   }
 
   async runPrompt(options: ClaudeRunOptions): Promise<ClaudeRunDescriptor> {
+    if (this.prepareRun) options = await this.prepareRun(options);
     if (this.active.has(options.runId)) {
       throw new TaskConflictError(
         'TASK_SESSION_BUSY',

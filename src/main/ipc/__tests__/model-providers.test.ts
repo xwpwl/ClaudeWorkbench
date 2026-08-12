@@ -100,6 +100,7 @@ function provider(overrides: Partial<PublicModelProvider> = {}): PublicModelProv
     isDefault: false,
     configured: true,
     credentialSource: 'credential_store',
+    agentModelStatus: 'valid',
     capabilities: {
       supportsClaudeCode: true,
       supportsAgentWorkflow: true,
@@ -520,6 +521,27 @@ describe('model provider IPC registration and trust boundary', () => {
     expect(test.selectionService.clearTaskOverride).not.toHaveBeenCalled();
   });
 
+  it('returns the stable management-only error when set-default rejects a Provider runtime', async () => {
+    const test = harness({ publicTransport: true });
+    test.service.setDefaultProvider.mockImplementation(() => {
+      throw new ModelProviderServiceError(
+        'PROVIDER_RUNTIME_NOT_RUNNABLE',
+        `private ${SENTINEL} credential_ref`,
+      );
+    });
+
+    const result = await test.invoke(IPC_CHANNELS.MODEL_PROVIDER_SET_DEFAULT, [PROVIDER_ID]);
+    expect(result).toStrictEqual({
+      schemaVersion: 1,
+      ok: false,
+      error: {
+        code: 'PROVIDER_RUNTIME_NOT_RUNNABLE',
+        message: '当前 Provider 可以管理和测试，但尚不能用于 Claude Code Agent。请选择支持 Claude Code Runtime 的 Provider。',
+      },
+    });
+    expect(JSON.stringify(result)).not.toMatch(/credential_ref|provider-secret-sentinel/iu);
+  });
+
   it('does not promote forged provider codes or fixed messages through local projectors', async () => {
     const forgedCode = harness({ publicTransport: true });
     const codedError = new Error(`C:\\Users\\PrivateProfile\\${SENTINEL}`) as Error & {
@@ -782,6 +804,8 @@ describe('project AI summary and trusted task switch option IPC', () => {
       modelId: 'mimo-v2.5-pro',
       modelDisplayName: 'MiMo Pro',
       runtimeType: 'claude-code',
+      purpose: 'task_agent_override',
+      source: 'configured_provider',
     }]);
     expect(JSON.stringify(result)).not.toMatch(/credential|baseUrl|capabilities|private-gateway/iu);
   });

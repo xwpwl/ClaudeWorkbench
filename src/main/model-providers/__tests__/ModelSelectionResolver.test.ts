@@ -592,6 +592,22 @@ describe('ModelSelectionResolver task switching', () => {
     expect(test.store.task.size).toBe(0);
   });
 
+  it('does not offer or persist a task Agent override without tools and MCP', () => {
+    const test = harness();
+    test.store.providers.get('provider-task')!.capabilities = {
+      ...capabilities(),
+      supportsTools: false,
+      supportsMCP: false,
+    };
+
+    expect(test.resolver.listTaskModelSwitchOptions().map((item) => item.providerId))
+      .not.toContain('provider-task');
+    expect(() => test.resolver.setTaskOverride({
+      taskId: 'task-1', providerId: 'provider-task', modelId: 'task-model', status: 'idle',
+    })).toThrow(/tools and MCP/iu);
+    expect(test.store.task.size).toBe(0);
+  });
+
   it('clears an idle task override without changing global settings', () => {
     const test = harness();
     test.store.task.set('task-1', { providerId: 'provider-task', modelId: 'task-model' });
@@ -853,10 +869,12 @@ describe('ModelSelectionResolver project inspection and trusted switch options',
       {
         providerId: 'provider-default', providerName: 'Default Provider',
         modelId: 'default-model', modelDisplayName: null, runtimeType: 'claude-code',
+        purpose: 'task_agent_override', source: 'configured_provider',
       },
       {
         providerId: 'provider-task', providerName: 'Task Provider',
         modelId: 'task-model', modelDisplayName: null, runtimeType: 'claude-code',
+        purpose: 'task_agent_override', source: 'configured_provider',
       },
     ]));
     expect(JSON.stringify(result)).not.toMatch(/DeepSeek|deepseek|synthetic:|forged-ownership|credential|baseUrl|capabilities/iu);

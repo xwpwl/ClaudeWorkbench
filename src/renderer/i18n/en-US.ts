@@ -468,6 +468,8 @@ const enUS: Record<LocaleKey, string> = {
   'model.switch.failed': 'Model switch failed. Stop the task and try again.',
   'model.switch.resetFailed': 'The model policy could not be restored. Stop the task and try again.',
   'model.switch.source': 'Current source',
+  'model.switch.optionPurpose': 'Use: Task Agent override',
+  'model.switch.optionSource': 'Source: configured Provider',
   'provider.cards.unsupportedSummary': 'Can be managed and connection-tested, but cannot run Claude Code Agent tasks',
   'provider.cards.advanced': 'Advanced details and actions',
   'provider.cards.pathHidden': 'Endpoint path is hidden and remains stored only in the main process.',

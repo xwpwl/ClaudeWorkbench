@@ -42,6 +42,8 @@ export const PUBLIC_IPC_FAILURE_MESSAGES = Object.freeze({
   CREDENTIAL_REENTRY_REQUIRED: 'Provider credential entry is required.',
   DELETE_CONFIRMATION_REQUIRED: 'Credential deletion confirmation is required.',
   UNSUPPORTED_RUNTIME: 'Provider is unavailable for Agent execution.',
+  PROVIDER_RUNTIME_NOT_RUNNABLE:
+    '当前 Provider 可以管理和测试，但尚不能用于 Claude Code Agent。请选择支持 Claude Code Runtime 的 Provider。',
   CREDENTIAL_CLEANUP_PENDING: 'Credential cleanup is pending.',
   INVALID_POLICY: 'Model policy configuration is invalid.',
   INVALID_SELECTION: 'The selected model is invalid.',

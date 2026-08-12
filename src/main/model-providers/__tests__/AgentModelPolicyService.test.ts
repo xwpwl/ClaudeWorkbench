@@ -212,7 +212,7 @@ describe('AgentModelPolicyService', () => {
   it.each([
     [{ enabled: false }, /disabled/iu],
     [{ credentialRef: null }, /configured/iu],
-    [{ capabilities: { ...provider().capabilities, supportsAgentWorkflow: false } }, /Agent Workflow/iu],
+    [{ capabilities: { ...provider().capabilities, supportsAgentWorkflow: false } }, /不能用于 Agent/u],
   ])('rejects unusable Providers', (override, error) => {
     const test = harness(override);
     expect(() => test.service.setAgentPolicy({
@@ -229,7 +229,10 @@ describe('AgentModelPolicyService', () => {
     expect(() => test.service.setAgentPolicy({
       agentType: 'reviewer', providerId: 'provider-1', modelId: 'mimo-pro',
       quality: null, speed: null, cost: null,
-    })).toThrow('当前 Provider 不支持 Claude Code Agent Runtime');
+    })).toThrowError(expect.objectContaining({
+      code: 'RUNTIME_INCOMPATIBLE',
+      message: '该模型当前不能用于 Agent，请重新选择。',
+    }));
     expect(test.assertRunnable).not.toHaveBeenCalled();
   });
 
@@ -240,7 +243,7 @@ describe('AgentModelPolicyService', () => {
     expect(() => test.service.setAgentPolicy({
       agentType, providerId: 'provider-1', modelId: 'mimo-pro',
       quality: null, speed: null, cost: null,
-    })).toThrow(/tools and MCP/iu);
+    })).toThrow(/不能用于 Agent/u);
   });
 
   it('permits a read-only Reviewer without tools/MCP', () => {
