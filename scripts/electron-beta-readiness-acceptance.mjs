@@ -2431,8 +2431,8 @@ async function launchProductionElectron(fixture, transferOwnership) {
   });
 }
 
-async function clickOwnedAccessibleButton(client, rootSelector, accessibleName, prefix = false) {
-  const clicked = await client.evaluate(`(() => {
+function ownedAccessibleButtonExpression(rootSelector, accessibleName, prefix, click) {
+  return `(() => {
     const roots = Array.from(document.querySelectorAll(${js(rootSelector)}));
     if (roots.length !== 1) return false;
     const root = roots[0];
@@ -2446,9 +2446,17 @@ async function clickOwnedAccessibleButton(client, rootSelector, accessibleName, 
         && (${prefix ? 'name.startsWith(wanted)' : 'name === wanted'});
     });
     if (matches.length !== 1) return false;
-    matches[0].click();
+    if (${click ? 'true' : 'false'}) matches[0].click();
     return true;
-  })()`);
+  })()`;
+}
+
+async function clickOwnedAccessibleButton(client, rootSelector, accessibleName, prefix = false) {
+  await client.waitFor(ownedAccessibleButtonExpression(rootSelector, accessibleName, prefix, false), {
+    description: `owned accessible UI control: ${accessibleName}`,
+    timeoutMs: STEP_TIMEOUT_MS,
+  });
+  const clicked = await client.evaluate(ownedAccessibleButtonExpression(rootSelector, accessibleName, prefix, true));
   assert(clicked, `Owned accessible UI control unavailable: ${accessibleName}`);
 }
 
@@ -6879,6 +6887,22 @@ async function runSelfTest() {
     expectThrow(() => selectOwnedUiButtonFact('first-run', buttons, 'Continue', true));
     expectThrow(() => selectOwnedUiButtonFact('first-run', [...buttons,
       { owner: 'first-run', accessibleName: 'Continue' }], 'Continue', false));
+  });
+
+  test('waits for an asynchronously rendered owned button before clicking it', async () => {
+    let ready = false;
+    let clicked = false;
+    const client = {
+      waitFor: async () => { ready = true; },
+      evaluate: async () => {
+        if (!ready) return false;
+        clicked = true;
+        return true;
+      },
+    };
+
+    await clickOwnedAccessibleButton(client, '[role="dialog"]', 'Generate read-only plan');
+    assert(clicked, 'The owned button was not clicked after its asynchronous render completed.');
   });
 
   test('scopes preset modal buttons by exact dialog title and exact button text', () => {
