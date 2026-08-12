@@ -20,6 +20,7 @@ import {
   persistProjectPolicyChange,
   startProviderPageSync,
   validateDraftAndClearCredential,
+  filterProviderModels,
 } from '../ModelProviderCenter';
 import * as providerCenterModule from '../ModelProviderCenter';
 import { setLocale } from '../../../i18n';
@@ -64,6 +65,24 @@ function viewMarkup(overrides: Partial<React.ComponentProps<typeof ModelProvider
 }
 
 describe('ModelProviderCenterView', () => {
+  it('searches large model catalogs and keeps the rendered window bounded', () => {
+    const catalog = Array.from({ length: 1_000 }, (_, index): ProviderModel => ({
+      providerId: 'mimo',
+      modelId: `catalog-model-${index}`,
+      displayName: index === 777 ? 'Needle Model' : null,
+      source: 'discovered',
+      createdAt: index,
+      updatedAt: index,
+    }));
+    expect(filterProviderModels(catalog, 'needle')).toEqual([catalog[777]]);
+
+    const html = viewMarkup({ models: catalog });
+    expect(html).toContain('data-virtualized="true"');
+    expect(html).toContain('aria-label="搜索模型"');
+    expect((html.match(/data-testid="provider-model-item"/g) ?? []).length).toBeLessThan(20);
+    expect(html).not.toContain('catalog-model-999');
+  });
+
   it('uses compact single-column Provider cards at the settings width', () => {
     const html = viewMarkup();
     expect(html).toContain('data-testid="provider-card-list"');

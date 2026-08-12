@@ -15,6 +15,11 @@ const environment: EnvironmentCheckResult = {
   gitBash: { ok: true, path: 'C:\\Program Files\\Git\\bin\\bash.exe', configured: false },
   shell: { ok: true, name: 'PowerShell', path: null },
   projectDir: { ok: true, readable: true, writable: true },
+  claudeConfiguration: { ok: true, source: 'claude_cli' },
+  buildTools: { required: false, ok: null },
+  providers: { runnable: 2 },
+  dataDirectory: { ok: true, writable: true },
+  sqlite: { ok: true, schemaVersion: 7 },
 };
 
 const originalApi = window.api;
@@ -35,6 +40,20 @@ describe('EnvironmentStatusList', () => {
     expect(html).toContain('Git Bash');
     expect(html).toContain('Auto-detected');
     expect(html).not.toContain('Not found');
+  });
+
+  it('shows runtime, storage, and source-only build-tool readiness', () => {
+    setLocale('en-US');
+    const html = renderToStaticMarkup(
+      React.createElement(EnvironmentStatusList, { result: environment }),
+    );
+
+    expect(html).toContain('Runnable Providers');
+    expect(html).toContain('2 available');
+    expect(html).toContain('Data directory');
+    expect(html).toContain('SQLite schema');
+    expect(html).toContain('Visual Studio Build Tools');
+    expect(html).toContain('Not required');
   });
 
   it('does not claim every check passed when trusted Git Bash availability failed', async () => {

@@ -18,23 +18,27 @@ import { AgentPresetSettings } from './AgentPresetSettings';
 import { EmptyState } from '../../components/EmptyState';
 import { gitStatusOutcome } from '../git/gitPanelModel';
 
-export type SettingsCategory = 'general' | 'models' | 'agent' | 'permissions' | 'git' | 'mcp' | 'skills' | 'data' | 'about';
+export type SettingsCategory = 'general' | 'models' | 'agent' | 'project' | 'permissions' | 'git' | 'mcp' | 'skills' | 'terminal_tools' | 'data' | 'about';
 
 interface SettingsDialogProps {
   onClose: () => void;
   initialCategory?: SettingsCategory;
   onOpenProject?: () => void;
+  onOpenProjectSettings?: (project: Project) => void;
   onOpenIntegrations?: (project: Project, initialTab: 'mcp' | 'skills') => void;
+  onRerunFirstRun?: () => void;
 }
 
 const CATEGORIES: { id: SettingsCategory; icon: React.ReactNode; labelKey: LocaleKey }[] = [
   { id: 'general', icon: <SettingsIcon size={16} />, labelKey: 'settings.general' },
   { id: 'models', icon: <Bot size={16} />, labelKey: 'settings.models' },
   { id: 'agent', icon: <Bot size={16} />, labelKey: 'settings.agent' },
+  { id: 'project', icon: <FolderOpen size={16} />, labelKey: 'settings.project' },
   { id: 'permissions', icon: <Shield size={16} />, labelKey: 'settings.permissions' },
   { id: 'git', icon: <GitBranch size={16} />, labelKey: 'settings.git' },
   { id: 'mcp', icon: <Plug size={16} />, labelKey: 'settings.mcp' },
   { id: 'skills', icon: <FileCode2 size={16} />, labelKey: 'settings.skills' },
+  { id: 'terminal_tools', icon: <Play size={16} />, labelKey: 'settings.terminalAndTools' },
   { id: 'data', icon: <Database size={16} />, labelKey: 'settings.dataSection' },
   { id: 'about', icon: <Info size={16} />, labelKey: 'settings.about' },
 ];
@@ -52,7 +56,9 @@ export function SettingsDialog({
   onClose,
   initialCategory = 'general',
   onOpenProject,
+  onOpenProjectSettings,
   onOpenIntegrations,
+  onRerunFirstRun,
 }: SettingsDialogProps) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [originalSettings, setOriginalSettings] = useState<AppSettings | null>(null);
@@ -70,6 +76,8 @@ export function SettingsDialog({
   const [updateError, setUpdateError] = useState('');
   const [diagnosticsExportBusy, setDiagnosticsExportBusy] = useState(false);
   const [diagnosticsExportError, setDiagnosticsExportError] = useState('');
+  const [firstRunBusy, setFirstRunBusy] = useState(false);
+  const [firstRunError, setFirstRunError] = useState('');
   const [testing, setTesting] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -204,6 +212,21 @@ export function SettingsDialog({
     onClose();
     return true;
   }, [hasChanges, onClose]);
+
+  const handleRerunFirstRun = useCallback(async () => {
+    if (hasChanges && !window.confirm(t('settings.unsavedChanges'))) return;
+    setFirstRunBusy(true);
+    setFirstRunError('');
+    try {
+      await window.api.setFirstRunResumeStep('welcome');
+      onRerunFirstRun?.();
+      onClose();
+    } catch {
+      setFirstRunError(t('about.firstRunRestartFailed'));
+    } finally {
+      setFirstRunBusy(false);
+    }
+  }, [hasChanges, onClose, onRerunFirstRun]);
 
   const handleTestClaude = useCallback(async () => {
     setTesting(true);
@@ -400,12 +423,6 @@ export function SettingsDialog({
               <div className="space-y-8">
                 <GeneralSection settings={settings} updateSetting={updateSetting} />
                 <AppearanceSection settings={settings} updateSetting={updateSetting} />
-                <TerminalToolsSection
-                  settings={settings}
-                  updateSetting={updateSetting}
-                  envCheck={envCheck}
-                  showGit={false}
-                />
               </div>
             )}
             {activeCategory === 'models' && (
@@ -441,6 +458,16 @@ export function SettingsDialog({
             {activeCategory === 'agent' && (
               <AgentSettingsSection onOpenProviderCenter={() => setActiveCategory('models')} />
             )}
+            {activeCategory === 'project' && (
+              <ProjectSettingsSection
+                project={currentProject}
+                onOpenProject={onOpenProject}
+                onOpenProjectSettings={(project) => {
+                  if (!handleClose()) return;
+                  onOpenProjectSettings?.(project);
+                }}
+              />
+            )}
             {activeCategory === 'permissions' && (
               <PermissionsSection
                 settings={settings}
@@ -466,6 +493,9 @@ export function SettingsDialog({
                 }}
               />
             )}
+            {activeCategory === 'terminal_tools' && (
+              <TerminalToolsSection settings={settings} updateSetting={updateSetting} envCheck={envCheck} showGit={false} />
+            )}
             {activeCategory === 'data' && (
               <DataSection settings={settings} />
             )}
@@ -484,6 +514,9 @@ export function SettingsDialog({
                 diagnosticsBusy={diagnosticsExportBusy}
                 diagnosticsError={diagnosticsExportError}
                 releaseError={releaseError}
+                firstRunBusy={firstRunBusy}
+                firstRunError={firstRunError}
+                onRerunFirstRun={() => void handleRerunFirstRun()}
                 onExportDiagnostics={(includeAnonymousPerformanceData) => {
                   setDiagnosticsExportBusy(true);
                   setDiagnosticsExportError('');
@@ -1122,6 +1155,35 @@ function ProjectIntegrationSection({
   );
 }
 
+function ProjectSettingsSection({
+  project,
+  onOpenProject,
+  onOpenProjectSettings,
+}: {
+  project: Project | null;
+  onOpenProject?: () => void;
+  onOpenProjectSettings: (project: Project) => void;
+}) {
+  if (!project) {
+    return (
+      <EmptyState
+        icon={FolderOpen}
+        title={t('settings.projectRequired')}
+        description={t('settings.projectDescription')}
+        action={{ label: t('settings.openProject'), onClick: () => onOpenProject?.(), disabled: !onOpenProject }}
+      />
+    );
+  }
+  return (
+    <EmptyState
+      icon={FolderOpen}
+      title={project.name}
+      description={t('settings.projectDescription')}
+      action={{ label: t('settings.openProjectAi'), onClick: () => onOpenProjectSettings(project) }}
+    />
+  );
+}
+
 // ============================================================
 // Appearance Section
 // ============================================================
@@ -1293,6 +1355,9 @@ export function AboutSection({
   diagnosticsBusy,
   diagnosticsError = '',
   releaseError = '',
+  firstRunBusy = false,
+  firstRunError = '',
+  onRerunFirstRun,
 }: {
   settings: AppSettings;
   updateSetting: <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => void;
@@ -1308,6 +1373,9 @@ export function AboutSection({
   diagnosticsBusy: boolean;
   diagnosticsError?: string;
   releaseError?: string;
+  firstRunBusy?: boolean;
+  firstRunError?: string;
+  onRerunFirstRun?: () => void;
 }) {
   const statusKey = `update.status.${updateState?.status ?? 'idle'}` as LocaleKey;
   const [includeAnonymousPerformanceData, setIncludeAnonymousPerformanceData] = useState(false);
@@ -1321,12 +1389,16 @@ export function AboutSection({
           <InfoRow label={t('about.buildId')} value={releaseInfo?.buildId ?? '—'} />
           <InfoRow label={t('about.commit')} value={releaseInfo?.commit ?? '—'} />
           <InfoRow label={t('about.electron')} value={releaseInfo?.electronVersion ?? '—'} />
+          <InfoRow label={t('about.node')} value={releaseInfo?.nodeVersion ?? '—'} />
           <InfoRow label={t('about.channel')} value={releaseInfo?.channel ?? '—'} />
           <InfoRow
             label={t('about.packagedState')}
             value={releaseInfo ? (releaseInfo.packaged ? t('about.packaged') : t('about.development')) : '—'}
           />
           <InfoRow label={t('about.claudeCode')} value={claudeVersion ?? '—'} />
+          <InfoRow label={t('about.sqliteSchema')} value={releaseInfo ? `v${releaseInfo.sqliteSchemaVersion}` : '—'} />
+          <InfoRow label={t('about.agentRuntime')} value={releaseInfo?.agentRuntime ?? '—'} />
+          <InfoRow label={t('about.dataDirectory')} value={settings.dataPath || '—'} />
         </div>
         {releaseError ? <p role="alert" className="mt-2 text-xs" style={{ color: 'var(--error)' }}>{releaseError}</p> : null}
       </section>
@@ -1397,6 +1469,21 @@ export function AboutSection({
           <Download size={13} />{diagnosticsBusy ? t('diag.exporting') : t('diag.exportButton')}
         </button>
         {diagnosticsError ? <p role="alert" className="mt-2 text-xs" style={{ color: 'var(--error)' }}>{diagnosticsError}</p> : null}
+      </section>
+
+      <section>
+        <SectionTitle>{t('about.firstRunTitle')}</SectionTitle>
+        <p className="mb-3 text-xs" style={{ color: 'var(--text-tertiary)' }}>{t('about.firstRunDescription')}</p>
+        <button
+          type="button"
+          onClick={onRerunFirstRun}
+          disabled={firstRunBusy || !onRerunFirstRun}
+          className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs disabled:opacity-50"
+          style={{ backgroundColor: 'var(--bg-hover)', color: 'var(--text-secondary)' }}
+        >
+          <RotateCcw size={13} />{firstRunBusy ? t('about.firstRunRestarting') : t('about.firstRunRestart')}
+        </button>
+        {firstRunError ? <p role="alert" className="mt-2 text-xs" style={{ color: 'var(--error)' }}>{firstRunError}</p> : null}
       </section>
 
       <section>

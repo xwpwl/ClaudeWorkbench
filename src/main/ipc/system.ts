@@ -15,6 +15,15 @@ import { PublicIpcError } from '../../shared/types/publicIpc';
 export interface SystemIPCOptions {
   /** Dynamic provider is preferred because registered projects can change after startup. */
   allowedPaths?: readonly string[] | (() => readonly string[]);
+  environmentFacts?: () => SystemEnvironmentFacts | Promise<SystemEnvironmentFacts>;
+}
+
+export interface SystemEnvironmentFacts {
+  dataDirectoryWritable: boolean;
+  sqliteOk: boolean;
+  sqliteSchemaVersion: number | null;
+  runnableProviderCount: number;
+  sourceDevelopment: boolean;
 }
 
 const CLAUDE_PUBLIC_ERROR = 'Claude Code is unavailable or could not be executed.';
@@ -287,6 +296,11 @@ export function registerSystemIPC(
       gitBash: { ok: false, path: null, configured: false },
       shell: { ok: false, name: null, path: null },
       projectDir: { ok: false, readable: false, writable: false },
+      claudeConfiguration: { ok: false, source: null },
+      buildTools: { required: false, ok: null },
+      providers: { runnable: 0 },
+      dataDirectory: { ok: false, writable: false },
+      sqlite: { ok: false, schemaVersion: null },
     };
 
     // Check Node.js
@@ -335,6 +349,38 @@ export function registerSystemIPC(
 
     // Project dir is checked separately
     result.projectDir = { ok: true, readable: true, writable: true };
+
+    const hasClaudeEnvironment = Boolean(process.env.ANTHROPIC_AUTH_TOKEN || process.env.ANTHROPIC_API_KEY);
+    result.claudeConfiguration = {
+      ok: hasClaudeEnvironment || result.claude.ok,
+      source: hasClaudeEnvironment ? 'environment' : result.claude.ok ? 'claude_cli' : null,
+    };
+
+    let facts: SystemEnvironmentFacts = {
+      dataDirectoryWritable: false,
+      sqliteOk: false,
+      sqliteSchemaVersion: null,
+      runnableProviderCount: 0,
+      sourceDevelopment: !app.isPackaged,
+    };
+    try {
+      if (options.environmentFacts) facts = await options.environmentFacts();
+    } catch {
+      // Keep the environment screen available with closed, repairable states.
+    }
+    result.buildTools = {
+      required: facts.sourceDevelopment,
+      ok: facts.sourceDevelopment ? resolveCommandPath('cl') !== null : null,
+    };
+    result.providers = { runnable: Math.max(0, Math.trunc(facts.runnableProviderCount)) };
+    result.dataDirectory = {
+      ok: facts.dataDirectoryWritable,
+      writable: facts.dataDirectoryWritable,
+    };
+    result.sqlite = {
+      ok: facts.sqliteOk,
+      schemaVersion: Number.isSafeInteger(facts.sqliteSchemaVersion) ? facts.sqliteSchemaVersion : null,
+    };
 
     return result;
   });

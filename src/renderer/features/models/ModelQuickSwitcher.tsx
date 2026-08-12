@@ -119,6 +119,12 @@ export function ModelQuickSwitcher({
   const selectedOptionIndex = options.findIndex((option) => (
     option.providerId === selection?.providerId && option.modelId === selection.modelId
   ));
+  const selectedOption = selectedOptionIndex >= 0 ? options[selectedOptionIndex] : null;
+  const projectStrategy = selection?.source === 'task_override'
+    ? t('model.switch.projectOverridden')
+    : selection?.source === 'project_policy'
+      ? t('model.switch.projectActive')
+      : t('model.switch.projectFollowsGlobal');
 
   return (
     <div ref={rootRef} className="relative" data-testid="model-quick-switcher">
@@ -181,6 +187,12 @@ export function ModelQuickSwitcher({
               <span>{runtimeTypeLabel(selection?.runtimeType ?? 'claude-code')}</span>
               <span style={{ color: 'var(--text-tertiary)' }}>{t('model.switch.source')}</span>
               <span>{sourceLabel(selection?.source ?? 'claude_code')}</span>
+              <span style={{ color: 'var(--text-tertiary)' }}>{t('model.switch.taskOverride')}</span>
+              <span>{selection?.source === 'task_override' ? t('model.switch.activeState') : t('model.switch.noneState')}</span>
+              <span style={{ color: 'var(--text-tertiary)' }}>{t('model.switch.projectStrategy')}</span>
+              <span>{projectStrategy}</span>
+              <span style={{ color: 'var(--text-tertiary)' }}>{t('model.switch.connection')}</span>
+              <span>{selectedOption?.connectionState === 'connected' ? t('provider.health.connected') : t('model.switch.connectionInherited')}</span>
             </div>
             {capabilities ? (
               <div className="grid grid-cols-[72px_1fr] gap-x-2 pt-1">

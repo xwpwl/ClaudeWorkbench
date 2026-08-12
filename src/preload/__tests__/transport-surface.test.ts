@@ -45,7 +45,7 @@ beforeEach(() => {
 });
 
 describe('preload exact named transport surface', () => {
-  it('exposes exactly 132 Promise methods and nine synchronous subscriptions with no raw IPC API', () => {
+  it('exposes exactly 134 Promise methods and nine synchronous subscriptions with no raw IPC API', () => {
     const transport = exposedTransport();
     expect(electronMocks.exposeInMainWorld.mock.calls.map(([name]) => name)).toStrictEqual([
       '__claudeWorkbenchIpcTransport',
@@ -59,7 +59,7 @@ describe('preload exact named transport surface', () => {
     expect(stringKeys).toStrictEqual(CLAUDE_WORKBENCH_API_METHODS);
     expect(keys).toHaveLength(CLAUDE_WORKBENCH_API_METHODS.length);
     expect(eventKeys).toStrictEqual(EVENT_METHODS);
-    expect(promiseKeys).toHaveLength(132);
+    expect(promiseKeys).toHaveLength(134);
     expect(stringKeys).not.toEqual(expect.arrayContaining([
       'invoke', 'on', 'send', 'removeListener', 'channel', 'then',
     ]));

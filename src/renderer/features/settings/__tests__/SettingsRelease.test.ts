@@ -16,13 +16,14 @@ const settings = {
   defaultModel: '', detectedModel: '', modelSource: 'claude-default',
   defaultPermissionMode: 'standard', showDangerousPermissions: false,
   gitPath: 'git', vscodePath: 'code', terminalShell: 'powershell',
-  theme: 'light', fontSize: 14, language: 'en-US', dataPath: '',
+  theme: 'light', fontSize: 14, language: 'en-US', dataPath: 'C:\\WorkbenchData',
   autoCheckUpdates: false,
 } satisfies AppSettings;
 
 const version: ReleaseVersionInfo = {
   version: '1.0.0', buildId: 'build-42', commit: '0123456789abcdef', channel: 'stable',
-  electronVersion: '35.6.0', packaged: true,
+  electronVersion: '35.6.0', nodeVersion: '24.1.0', sqliteSchemaVersion: 7,
+  agentRuntime: 'claude-code', packaged: true,
 };
 
 const originalApi = window.api;
@@ -37,6 +38,11 @@ function installApi(overrides: Record<string, unknown> = {}) {
       gitBash: { ok: true, path: null, configured: false },
       shell: { ok: true, name: 'PowerShell', path: null },
       projectDir: { ok: true, readable: true, writable: true },
+      claudeConfiguration: { ok: true, source: 'claude_cli' },
+      buildTools: { required: false, ok: null },
+      providers: { runnable: 1 },
+      dataDirectory: { ok: true, writable: true },
+      sqlite: { ok: true, schemaVersion: 7 },
     })),
     getConnectionStatus: vi.fn(async () => ({})),
     getReleaseVersion: vi.fn(async () => version),
@@ -83,7 +89,7 @@ function markup(state: UpdateSnapshot) {
 describe('release settings UI', () => {
   it('renders version, build, commit, Electron, and channel metadata', () => {
     const html = markup(update('idle'));
-    for (const value of ['1.0.0', 'build-42', '0123456789abcdef', '35.6.0', 'stable']) {
+    for (const value of ['1.0.0', 'build-42', '0123456789abcdef', '35.6.0', 'stable', 'C:\\WorkbenchData']) {
       expect(html).toContain(value);
     }
   });

@@ -4606,6 +4606,7 @@ async function runProductionAcceptance(options) {
     screenshots.push(await screenshot(client, '01-first-run.png'));
     addStep(1, 'Fresh production profile shows First Run', { completedVersion: await client.evaluate('window.api.getFirstRunCompletedVersion()') });
 
+    await clickFirstRunButton(client, 'Start setup');
     await clickFirstRunButton(client, 'Continue');
     await clickFirstRunButton(client, firstRunProviderConfigureLabel());
     await client.waitFor(`Boolean(document.querySelector('[data-testid="model-provider-center"]'))`, { description: 'Provider Center' });
@@ -5020,7 +5021,7 @@ async function runProductionAcceptance(options) {
           && restartScreenshotReady.workflowIdentityLeafCount === 1
           && restartScreenshotReady.authoritativeWorkflowMatch === true } });
 
-    await openSettingsCategory(restartClient, 'Data');
+    await openSettingsCategory(restartClient, 'Data & Diagnostics');
     const defaultOff = await restartClient.evaluate(`document.querySelector('[data-testid="data-anonymous-performance"]')?.checked === false`);
     assert(defaultOff, 'Anonymous performance data was not default-off.');
     const step14Screenshot = await captureDataSettingsScreenshotMasked(restartClient,
@@ -5054,7 +5055,7 @@ async function runProductionAcceptance(options) {
     phase = 'step15_close_settings_after_default_off_export';
     await closeSettings(restartClient);
     phase = 'step15_reopen_data_settings';
-    await openSettingsCategory(restartClient, 'Data');
+    await openSettingsCategory(restartClient, 'Data & Diagnostics');
     phase = 'step15_assert_reopened_default_off';
     assert(await restartClient.evaluate(`document.querySelector('[data-testid="data-anonymous-performance"]')?.checked === false`),
       'Anonymous performance opt-in persisted without explicit opt-in.');

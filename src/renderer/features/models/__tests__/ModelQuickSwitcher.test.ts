@@ -43,6 +43,28 @@ describe('ModelQuickSwitcher', () => {
     expect(html).toContain('MCP');
   });
 
+  it('shows task override, current project strategy, and trusted connection context', () => {
+    setLocale('en-US');
+    try {
+      const html = renderToStaticMarkup(React.createElement(ModelQuickSwitcher, {
+        selection,
+        options: [{ ...options[0], connectionState: 'connected' }],
+        isTaskRunning: false,
+        open: true,
+        onOpenChange: () => {},
+        onSwitch: () => {},
+      }));
+      expect(html).toContain('Task override');
+      expect(html).toContain('Active');
+      expect(html).toContain('Project strategy');
+      expect(html).toContain('Overridden by task model');
+      expect(html).toContain('Connection');
+      expect(html).toContain('Connected');
+    } finally {
+      setLocale('zh-CN');
+    }
+  });
+
   it.each([
     ['project_policy', '项目策略'],
     ['global_agent_policy', '全局默认'],

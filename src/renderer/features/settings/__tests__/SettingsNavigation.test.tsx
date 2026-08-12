@@ -57,6 +57,11 @@ function installApi(overrides: Record<string, unknown> = {}) {
       gitBash: { ok: true, path: null, configured: false },
       shell: { ok: true, name: 'PowerShell', path: null },
       projectDir: { ok: true, readable: true, writable: true },
+      claudeConfiguration: { ok: true, source: 'claude_cli' },
+      buildTools: { required: false, ok: null },
+      providers: { runnable: 1 },
+      dataDirectory: { ok: true, writable: true },
+      sqlite: { ok: true, schemaVersion: 7 },
     })),
     getConnectionStatus: vi.fn(async () => ({})),
     listModelProviders: vi.fn(async () => ({ items: [], total: 0, limit: 25, offset: 0 })),
@@ -68,9 +73,11 @@ function installApi(overrides: Record<string, unknown> = {}) {
     getAgentPresetStatus: vi.fn(async () => ({ kind: 'custom' })),
     getReleaseVersion: vi.fn(async () => ({
       version: '1.0.0', buildId: 'build-1', commit: '0123456', channel: 'stable',
-      electronVersion: '35.6.0', packaged: true,
+      electronVersion: '35.6.0', nodeVersion: '24.1.0', sqliteSchemaVersion: 7,
+      agentRuntime: 'claude-code', packaged: true,
     })),
     getUpdateState: vi.fn(async () => ({ status: 'idle', version: null, reason: null, message: null })),
+    setFirstRunResumeStep: vi.fn(async () => undefined),
     exportDiagnostics: vi.fn(async () => null),
     getGitWorkspaceStatus: vi.fn(async () => gitStatus()),
     ...overrides,
@@ -95,14 +102,41 @@ afterEach(() => {
 });
 
 describe('Settings information architecture', () => {
-  it('shows exactly the nine product categories and no duplicate legacy owners', async () => {
+  it('reopens the resumable first-run wizard from About', async () => {
+    const api = installApi();
+    const onClose = vi.fn();
+    const onRerunFirstRun = vi.fn();
+    render(<SettingsDialog initialCategory="about" onClose={onClose} onRerunFirstRun={onRerunFirstRun} />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('button', { name: '重新运行首次配置向导' }));
+
+    await waitFor(() => expect(api.setFirstRunResumeStep).toHaveBeenCalledWith('welcome'));
+    expect(onRerunFirstRun).toHaveBeenCalledOnce();
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('shows exactly the eleven desktop product categories and no duplicate legacy owners', async () => {
     render(<SettingsDialog onClose={vi.fn()} />);
     await screen.findByRole('dialog', { name: '设置' });
-    const expected = ['常规', '模型与连接', 'Agent', '权限', 'Git', 'MCP', 'Skills', '数据', '关于'];
+    const expected = ['常规', '模型与连接', 'Agent', '项目', '权限', 'Git 与 Checkpoint', 'MCP', 'Skills', '终端与工具', '数据与诊断', '关于'];
     for (const name of expected) expect(screen.getByRole('button', { name })).not.toBeNull();
     expect(screen.queryByRole('button', { name: 'Claude Code' })).toBeNull();
-    expect(screen.queryByRole('button', { name: '终端与工具' })).toBeNull();
     expect(screen.queryByRole('button', { name: '外观' })).toBeNull();
+  });
+
+  it('routes the Project category to the current project AI settings', async () => {
+    useWorkspaceStore.setState({ currentProject });
+    const onClose = vi.fn();
+    const onOpenProjectSettings = vi.fn();
+    render(<SettingsDialog onClose={onClose} onOpenProjectSettings={onOpenProjectSettings} />);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole('button', { name: '项目' }));
+    await user.click(screen.getByRole('button', { name: '打开项目 AI 设置' }));
+
+    expect(onOpenProjectSettings).toHaveBeenCalledWith(currentProject);
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it('opens Models & Connections directly for first-run Provider configuration', async () => {
@@ -147,7 +181,7 @@ describe('Settings information architecture', () => {
     render(<SettingsDialog onClose={vi.fn()} onOpenProject={vi.fn()} />);
     const user = userEvent.setup();
 
-    await user.click(await screen.findByRole('button', { name: 'Git' }));
+    await user.click(await screen.findByRole('button', { name: 'Git 与 Checkpoint' }));
 
     expect(screen.getByText('打开项目以检查 Git')).not.toBeNull();
     expect(api.getGitWorkspaceStatus).not.toHaveBeenCalled();
@@ -167,7 +201,7 @@ describe('Settings information architecture', () => {
     render(<SettingsDialog onClose={vi.fn()} />);
     const user = userEvent.setup();
 
-    await user.click(await screen.findByRole('button', { name: 'Git' }));
+    await user.click(await screen.findByRole('button', { name: 'Git 与 Checkpoint' }));
 
     expect(await screen.findByText('当前项目仓库')).not.toBeNull();
     expect(screen.getByText('main')).not.toBeNull();
@@ -185,7 +219,7 @@ describe('Settings information architecture', () => {
     render(<SettingsDialog onClose={vi.fn()} />);
     const user = userEvent.setup();
 
-    await user.click(await screen.findByRole('button', { name: 'Git' }));
+    await user.click(await screen.findByRole('button', { name: 'Git 与 Checkpoint' }));
 
     expect(await screen.findByText('当前项目不是 Git 仓库')).not.toBeNull();
     expect(document.body.textContent).not.toContain('Error invoking remote method');
@@ -201,7 +235,7 @@ describe('Settings information architecture', () => {
     render(<SettingsDialog onClose={vi.fn()} />);
     const user = userEvent.setup();
 
-    await user.click(await screen.findByRole('button', { name: 'Git' }));
+    await user.click(await screen.findByRole('button', { name: 'Git 与 Checkpoint' }));
 
     expect((await screen.findByRole('alert')).textContent).toContain('无法读取当前项目的 Git 状态。请重试。');
     expect(document.body.textContent).not.toContain('owner-sentinel');

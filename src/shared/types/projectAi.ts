@@ -94,6 +94,7 @@ export interface TaskModelSwitchOptionPublic {
   modelId: string;
   modelDisplayName: string | null;
   runtimeType: ImplementedAgentRuntimeType;
+  connectionState?: 'connected';
   purpose?: 'task_agent_override';
   source?: 'configured_provider';
 }

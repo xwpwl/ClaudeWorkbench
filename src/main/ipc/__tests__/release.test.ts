@@ -13,7 +13,8 @@ function harness() {
   } as unknown as IpcMain;
   const version = {
     version: '1.0.0', buildId: 'build-7', commit: '0123456', channel: 'stable',
-    electronVersion: '35.6.0', packaged: true,
+    electronVersion: '35.6.0', nodeVersion: '24.1.0', sqliteSchemaVersion: 7,
+    agentRuntime: 'claude-code' as const, packaged: true,
   };
   const idle = { status: 'idle', version: null, reason: null, message: null } as const;
   const available = { status: 'available', version: '1.1.0', reason: null, message: null } as const;
@@ -79,4 +80,3 @@ describe('release IPC', () => {
     expect(test.ipcMain.removeHandler).toHaveBeenCalledTimes(5);
   });
 });
-

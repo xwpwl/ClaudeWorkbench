@@ -260,6 +260,9 @@ async function initializeServices(): Promise<void> {
   const releaseVersion = buildVersionInfo({
     version: app.getVersion(),
     electronVersion: process.versions.electron,
+    nodeVersion: process.versions.node,
+    sqliteSchemaVersion: db.getDiagnosticsSummary().schemaVersion,
+    agentRuntime: 'claude-code',
     packaged: app.isPackaged,
   });
   let recoveryReport: RecoveryReport;
@@ -656,6 +659,28 @@ async function initializeServices(): Promise<void> {
       dataRoot,
       ...(db?.listProjects().map((project) => project.path) ?? []),
     ],
+    environmentFacts: async () => {
+      let dataDirectoryWritable = true;
+      try {
+        fs.accessSync(dataRoot, fs.constants.W_OK);
+      } catch {
+        dataDirectoryWritable = false;
+      }
+      const database = db!.getDiagnosticsSummary();
+      let runnableProviderCount = 0;
+      try {
+        runnableProviderCount = (await modelTierService.listCandidates()).length;
+      } catch {
+        // Report a closed zero count while leaving the rest of the summary usable.
+      }
+      return {
+        dataDirectoryWritable,
+        sqliteOk: database.integrity === 'ok',
+        sqliteSchemaVersion: database.schemaVersion,
+        runnableProviderCount,
+        sourceDevelopment: !app.isPackaged,
+      };
+    },
   });
   registerFileChangesIPC(publicIpcMain, { database: db, tasks: taskManager });
   registerHistoryIPC(publicIpcMain, historyAdapter);

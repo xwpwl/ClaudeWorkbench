@@ -3,6 +3,9 @@ import type { ReleaseVersionInfo } from '../../shared/types/ipc';
 export interface VersionInfoInput {
   version: string;
   electronVersion?: string | null;
+  nodeVersion?: string | null;
+  sqliteSchemaVersion?: number;
+  agentRuntime?: 'claude-code';
   packaged: boolean;
   environment?: Readonly<Record<string, string | undefined>>;
 }
@@ -38,6 +41,11 @@ export function buildVersionInfo(input: VersionInfoInput): ReleaseVersionInfo {
     commit: safeValue(environment.WORKBENCH_COMMIT, SAFE_COMMIT, 'unknown'),
     channel: safeValue(environment.WORKBENCH_RELEASE_CHANNEL, SAFE_CHANNEL, 'stable'),
     electronVersion: safeValue(input.electronVersion ?? undefined, SAFE_BUILD_VALUE, 'unknown'),
+    nodeVersion: safeValue(input.nodeVersion ?? undefined, SAFE_BUILD_VALUE, 'unknown'),
+    sqliteSchemaVersion: Number.isSafeInteger(input.sqliteSchemaVersion) && (input.sqliteSchemaVersion ?? -1) >= 0
+      ? input.sqliteSchemaVersion!
+      : 0,
+    agentRuntime: input.agentRuntime ?? 'claude-code',
     packaged: input.packaged,
   };
 }

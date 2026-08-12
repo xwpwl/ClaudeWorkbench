@@ -1,6 +1,6 @@
 import type { AppDatabase } from '../database/Database';
 import { IPC_CHANNELS } from '../../shared/types/ipc';
-import type { AppSettings } from '../../shared/types/ipc';
+import { FIRST_RUN_RESUME_STEPS, type AppSettings } from '../../shared/types/ipc';
 import type { UIPermissionMode } from '../../shared/types/claude';
 import { LEGACY_PERMISSION_MAP } from '../../shared/types/claude';
 import { z } from 'zod';
@@ -8,6 +8,8 @@ import { assertTrustedMainFrame, type TrustedRendererIPCDependencies } from './t
 import type { PublicIpcRegistrar } from './public-invoke-boundary';
 
 const FIRST_RUN_COMPLETED_VERSION_KEY = 'firstRunCompletedVersion';
+const FIRST_RUN_RESUME_STEP_KEY = 'firstRunResumeStep';
+const firstRunResumeStepSchema = z.enum(FIRST_RUN_RESUME_STEPS);
 
 const DEFAULT_SETTINGS: AppSettings = {
   // Claude Code
@@ -142,5 +144,21 @@ export function registerSettingsIPC(
     const parsed = z.tuple([z.literal(1)]).safeParse(args);
     if (!parsed.success) throw new Error('Invalid first-run completion version.');
     db.setSetting(FIRST_RUN_COMPLETED_VERSION_KEY, '1');
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FIRST_RUN_GET_RESUME_STEP, async (event, ...args) => {
+    assertTrustedMainFrame(event, trustedRenderer);
+    if (!z.tuple([]).safeParse(args).success) {
+      throw new Error('Invalid first-run resume request.');
+    }
+    const parsed = firstRunResumeStepSchema.safeParse(db.getSetting(FIRST_RUN_RESUME_STEP_KEY));
+    return parsed.success ? parsed.data : 'welcome';
+  });
+
+  ipcMain.handle(IPC_CHANNELS.FIRST_RUN_SET_RESUME_STEP, async (event, ...args) => {
+    assertTrustedMainFrame(event, trustedRenderer);
+    const parsed = z.tuple([firstRunResumeStepSchema]).safeParse(args);
+    if (!parsed.success) throw new Error('Invalid first-run resume step.');
+    db.setSetting(FIRST_RUN_RESUME_STEP_KEY, parsed.data[0]);
   });
 }

@@ -9,7 +9,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { canonicalProjectKey } from '../../../shared/sessionIdentity';
-import type { EnvironmentCheckResult } from '../../../shared/types/ipc';
+import type { EnvironmentCheckResult, FirstRunResumeStep } from '../../../shared/types/ipc';
 import type { PublicModelProvider } from '../../../shared/types/modelProviders';
 import type { Project } from '../../../shared/types/project';
 import type { Workflow } from '../../../shared/types/workflow';
@@ -19,7 +19,7 @@ import { submitWorkflowPlan, workflowSessionPatch } from '../chat/InputBar';
 
 export const FIRST_RUN_READ_ONLY_PROMPT = 'Analyze this project structure without modifying files.';
 
-type FirstRunStep = 'environment' | 'provider' | 'project' | 'first_task' | 'completing';
+type FirstRunStep = FirstRunResumeStep | 'completing';
 
 interface ProviderPage {
   items: PublicModelProvider[];
@@ -39,15 +39,18 @@ export interface FirstRunWizardPort {
   listModelProviders(): Promise<ProviderPage>;
   onModelProviderChanged(listener: () => void): () => void;
   createFirstRunTestProject(): Promise<Project>;
+  setFirstRunResumeStep(step: FirstRunResumeStep): Promise<void>;
   setFirstRunCompletedVersion(version: 1): Promise<void>;
 }
 
 interface FirstRunWizardProps {
   api: FirstRunWizardPort;
   completionReadFailed?: boolean;
+  initialStep?: FirstRunResumeStep;
   initialProject: Project | null;
   projectIncarnation?: number;
   onOpenProviderCenter(): void;
+  onOpenEnvironmentSettings?(): void;
   onOpenProject(): Promise<Project | null>;
   onSelectProject(project: Project): Promise<void>;
   onStartPlanner(project: Project): Promise<Workflow>;
@@ -185,15 +188,17 @@ function providerStatusColor(provider: PublicModelProvider): string {
 export function FirstRunWizard({
   api,
   completionReadFailed = false,
+  initialStep = 'environment',
   initialProject,
   projectIncarnation = 0,
   onOpenProviderCenter,
+  onOpenEnvironmentSettings,
   onOpenProject,
   onSelectProject,
   onStartPlanner,
   onDone,
 }: FirstRunWizardProps) {
-  const [step, setStep] = useState<FirstRunStep>('environment');
+  const [step, setStep] = useState<FirstRunStep>(initialStep);
   const [environment, setEnvironment] = useState<EnvironmentCheckResult | null>(null);
   const [environmentFailed, setEnvironmentFailed] = useState(false);
   const [providers, setProviders] = useState<PublicModelProvider[]>([]);
@@ -207,7 +212,7 @@ export function FirstRunWizard({
   const [busy, setBusy] = useState(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(false);
-  const stepRef = useRef<FirstRunStep>('environment');
+  const stepRef = useRef<FirstRunStep>(initialStep);
   const stepScopeRef = useRef(0);
   const operationEpochRef = useRef(0);
   const providerEpochRef = useRef(0);
@@ -222,17 +227,29 @@ export function FirstRunWizard({
     operationEpochRef.current += 1;
     stepScopeRef.current += 1;
   }
-  const completionFromRef = useRef<Exclude<FirstRunStep, 'completing'>>('environment');
+  const completionFromRef = useRef<Exclude<FirstRunStep, 'completing'>>(initialStep);
   const focusOriginRef = useRef<HTMLElement | null>(
     document.activeElement instanceof HTMLElement ? document.activeElement : null,
   );
 
-  const goToStep = useCallback((next: FirstRunStep) => {
-    stepScopeRef.current += 1;
-    stepRef.current = next;
+  const goToStep = useCallback(async (next: FirstRunResumeStep) => {
+    const epoch = ++operationEpochRef.current;
+    setBusy(true);
     setError(null);
-    setStep(next);
-  }, []);
+    try {
+      await api.setFirstRunResumeStep(next);
+      if (!mountedRef.current || operationEpochRef.current !== epoch) return;
+      stepScopeRef.current += 1;
+      stepRef.current = next;
+      setStep(next);
+    } catch {
+      if (mountedRef.current && operationEpochRef.current === epoch) {
+        setError(t('firstRun.resumeWriteFailed'));
+      }
+    } finally {
+      if (mountedRef.current && operationEpochRef.current === epoch) setBusy(false);
+    }
+  }, [api]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -445,6 +462,26 @@ export function FirstRunWizard({
 
   const renderStep = () => {
     const visibleStep = step === 'completing' ? completionFromRef.current : step;
+    if (visibleStep === 'welcome') {
+      return (
+        <>
+          <StepHeading title={t('firstRun.welcome.title')} description={t('firstRun.welcome.description')} />
+          <div className="space-y-3 rounded-lg border p-4 text-sm" style={{ borderColor: 'var(--border-primary)', background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' }}>
+            <p>{t('firstRun.welcome.local')}</p>
+            <p>{t('firstRun.welcome.provider')}</p>
+            <p>{t('firstRun.welcome.byok')}</p>
+            <p>{t('firstRun.welcome.runtime')}</p>
+            <p>{t('firstRun.welcome.openAi')}</p>
+          </div>
+          <div className="mt-5 flex flex-wrap justify-end gap-2">
+            <SecondaryButton disabled={busy} onClick={() => void complete()}>{t('firstRun.welcome.later')}</SecondaryButton>
+            <PrimaryButton disabled={busy} onClick={() => void goToStep('environment')}>
+              {t('firstRun.welcome.start')}<ChevronRight size={15} aria-hidden="true" />
+            </PrimaryButton>
+          </div>
+        </>
+      );
+    }
     if (visibleStep === 'environment') {
       return (
         <>
@@ -458,8 +495,22 @@ export function FirstRunWizard({
               <Loader2 size={18} className="animate-spin" aria-hidden="true" />{t('env.checking')}
             </div>
           )}
-          <div className="mt-5 flex justify-end">
-            <PrimaryButton disabled={busy} onClick={() => goToStep('provider')}>
+          <div className="mt-5 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap gap-2">
+              <SecondaryButton disabled={busy} onClick={() => void loadEnvironment()}>{t('firstRun.environment.recheck')}</SecondaryButton>
+              <SecondaryButton disabled={busy || !onOpenEnvironmentSettings} onClick={onOpenEnvironmentSettings}>{t('firstRun.environment.openSettings')}</SecondaryButton>
+              <a
+                href="https://docs.anthropic.com/en/docs/claude-code/overview"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center justify-center rounded-lg px-3 py-2 text-sm"
+                style={{ color: 'var(--accent)', background: 'var(--bg-hover)' }}
+              >
+                {t('firstRun.environment.repairGuide')}
+              </a>
+              <SecondaryButton disabled={busy} onClick={() => void complete()}>{t('firstRun.environment.later')}</SecondaryButton>
+            </div>
+            <PrimaryButton disabled={busy} onClick={() => void goToStep('provider')}>
               {t('firstRun.continue')}<ChevronRight size={15} aria-hidden="true" />
             </PrimaryButton>
           </div>
@@ -502,12 +553,12 @@ export function FirstRunWizard({
           )}
           <div className="mt-5 flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap gap-2">
-              <SecondaryButton disabled={busy} onClick={() => goToStep('environment')}>{t('firstRun.back')}</SecondaryButton>
+              <SecondaryButton disabled={busy} onClick={() => void goToStep('environment')}>{t('firstRun.back')}</SecondaryButton>
               <SecondaryButton disabled={busy} onClick={onOpenProviderCenter}>
                 <Settings2 size={15} aria-hidden="true" />{t('firstRun.provider.configure')}
               </SecondaryButton>
             </div>
-            <PrimaryButton disabled={busy} onClick={() => goToStep('project')}>
+            <PrimaryButton disabled={busy} onClick={() => void goToStep('project')}>
               {t('firstRun.continue')}<ChevronRight size={15} aria-hidden="true" />
             </PrimaryButton>
           </div>
@@ -535,19 +586,19 @@ export function FirstRunWizard({
           </div>
           <div className="mt-5 flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap gap-2">
-              <SecondaryButton disabled={busy} onClick={() => goToStep('provider')}>{t('firstRun.back')}</SecondaryButton>
+              <SecondaryButton disabled={busy} onClick={() => void goToStep('provider')}>{t('firstRun.back')}</SecondaryButton>
               <SecondaryButton disabled={busy} onClick={() => {
                 setReadyPlan(null);
                 setPlannerFailed(false);
                 setSelectedProject(null);
                 setProjectSkipped(true);
-                goToStep('first_task');
+                void goToStep('first_task');
               }}>{t('firstRun.project.skip')}</SecondaryButton>
             </div>
             {selectedProject ? (
               <PrimaryButton disabled={busy} onClick={() => {
                 setProjectSkipped(false);
-                goToStep('first_task');
+                void goToStep('first_task');
               }}>
                 {t('firstRun.project.continueWith')} {selectedProject.name}
               </PrimaryButton>
@@ -582,7 +633,7 @@ export function FirstRunWizard({
           </div>
         ) : null}
         <div className="mt-5 flex justify-between gap-2">
-          <SecondaryButton disabled={busy} onClick={() => goToStep('project')}>{t('firstRun.back')}</SecondaryButton>
+          <SecondaryButton disabled={busy} onClick={() => void goToStep('project')}>{t('firstRun.back')}</SecondaryButton>
           <PrimaryButton disabled={busy} onClick={() => void complete()}>{t('firstRun.finish')}</PrimaryButton>
         </div>
       </>
@@ -605,7 +656,7 @@ export function FirstRunWizard({
           <div className="min-w-0">
             <h1 id="first-run-title" className="truncate text-base font-semibold">{t('firstRun.title')}</h1>
             <div className="mt-1 text-[11px]" style={{ color: 'var(--text-tertiary)' }}>
-              {['environment', 'provider', 'project', 'first_task'].indexOf(step === 'completing' ? completionFromRef.current : step) + 1} / 4
+              {['welcome', 'environment', 'provider', 'project', 'first_task'].indexOf(step === 'completing' ? completionFromRef.current : step) + 1} / 5
             </div>
           </div>
           <SecondaryButton disabled={busy} onClick={() => void complete()}>{t('firstRun.completeLater')}</SecondaryButton>

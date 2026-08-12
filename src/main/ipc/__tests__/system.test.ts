@@ -345,6 +345,28 @@ describe('system environment privacy and process execution', () => {
     );
   });
 
+  it('adds trusted runtime readiness facts without returning a data or credential path', async () => {
+    const test = harness({
+      environmentFacts: vi.fn(async () => ({
+        dataDirectoryWritable: true,
+        sqliteOk: true,
+        sqliteSchemaVersion: 7,
+        runnableProviderCount: 2,
+        sourceDevelopment: false,
+      })),
+    });
+
+    const environment = await test.invoke(IPC_CHANNELS.SYSTEM_CHECK_ENV);
+    expect(environment).toMatchObject({
+      claudeConfiguration: { ok: true, source: 'claude_cli' },
+      buildTools: { required: false, ok: null },
+      providers: { runnable: 2 },
+      dataDirectory: { ok: true, writable: true },
+      sqlite: { ok: true, schemaVersion: 7 },
+    });
+    expect(JSON.stringify(environment)).not.toContain(testRoot);
+  });
+
   it('returns a fixed public Claude error instead of child-process details', async () => {
     mocks.execFileSync.mockImplementation(() => {
       throw new Error('spawn C:\\Users\\private\\claude.cmd sk-ant-super-secret');

@@ -41,6 +41,11 @@ const environment: EnvironmentCheckResult = {
   gitBash: { ok: false, path: null, configured: false },
   shell: { ok: true, name: 'PowerShell', path: 'powershell.exe' },
   projectDir: { ok: true, readable: true, writable: true },
+  claudeConfiguration: { ok: false, source: null },
+  buildTools: { required: false, ok: null },
+  providers: { runnable: 1 },
+  dataDirectory: { ok: true, writable: true },
+  sqlite: { ok: true, schemaVersion: 7 },
 };
 
 const provider: PublicModelProvider = {
@@ -124,6 +129,7 @@ function port(overrides: Partial<FirstRunWizardPort> = {}): FirstRunWizardPort {
     listModelProviders: vi.fn(async () => ({ items: [provider], total: 1, limit: 25, offset: 0 })),
     onModelProviderChanged: vi.fn(() => () => undefined),
     createFirstRunTestProject: vi.fn(async () => project),
+    setFirstRunResumeStep: vi.fn(async () => undefined),
     setFirstRunCompletedVersion: vi.fn(async () => undefined),
     ...overrides,
   };
@@ -134,11 +140,13 @@ function renderWizard(options: {
   completionReadFailed?: boolean;
   initialProject?: Project | null;
   onOpenProviderCenter?: () => void;
+  onOpenEnvironmentSettings?: () => void;
   onOpenProject?: () => Promise<Project | null>;
   onSelectProject?: (value: Project) => Promise<void>;
   onStartPlanner?: (value: Project) => Promise<Workflow>;
   onDone?: () => void;
   projectIncarnation?: number;
+  initialStep?: 'welcome' | 'environment' | 'provider' | 'project' | 'first_task';
 } = {}) {
   const IncarnationAwareWizard = FirstRunWizard as React.ComponentType<
     React.ComponentProps<typeof FirstRunWizard> & { projectIncarnation?: number }
@@ -148,11 +156,13 @@ function renderWizard(options: {
     completionReadFailed: options.completionReadFailed ?? false,
     initialProject: options.initialProject ?? null,
     onOpenProviderCenter: options.onOpenProviderCenter ?? vi.fn(),
+    onOpenEnvironmentSettings: options.onOpenEnvironmentSettings ?? vi.fn(),
     onOpenProject: options.onOpenProject ?? vi.fn(async () => null),
     onSelectProject: options.onSelectProject ?? vi.fn(async () => undefined),
     onStartPlanner: options.onStartPlanner ?? vi.fn(async () => workflow()),
     onDone: options.onDone ?? vi.fn(),
     projectIncarnation: options.projectIncarnation ?? 0,
+    initialStep: options.initialStep ?? 'environment',
   };
   return { ...render(<IncarnationAwareWizard {...props} />), props };
 }
@@ -188,6 +198,53 @@ afterEach(cleanup);
 beforeEach(() => setLocale('zh-CN'));
 
 describe('FirstRunWizard', () => {
+  it('starts with the local-first product disclosure and makes all network work explicit', async () => {
+    setLocale('zh-CN');
+    const api = port();
+    renderWizard({ api, initialStep: 'welcome' });
+
+    expect((await screen.findAllByRole('heading', { name: '欢迎使用 Claude Workbench' })).length).toBeGreaterThan(0);
+    expect(screen.getByText(/本地优先的多模型 Agent 开发工作台/u)).not.toBeNull();
+    expect(screen.getByText(/模型请求会发送给你选择的 Provider/u)).not.toBeNull();
+    expect(screen.getByText(/OpenAI-compatible Provider/u)).not.toBeNull();
+    expect(api.checkEnvironment).not.toHaveBeenCalled();
+    expect(api.listModelProviders).not.toHaveBeenCalled();
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: '开始配置' }));
+    expect(api.setFirstRunResumeStep).toHaveBeenCalledWith('environment');
+    expect(await screen.findByText('Git Bash')).not.toBeNull();
+  });
+
+  it('persists the destination step before showing it and leaves credentials outside the state API', async () => {
+    const resumeWrite = deferred<void>();
+    const api = port({ setFirstRunResumeStep: vi.fn(() => resumeWrite.promise) });
+    renderWizard({ api, initialStep: 'environment' });
+    const user = userEvent.setup();
+    await screen.findByText('Git Bash');
+    await user.click(screen.getByRole('button', { name: '继续' }));
+
+    expect(api.setFirstRunResumeStep).toHaveBeenCalledWith('provider');
+    await act(async () => resumeWrite.resolve());
+    expect(await screen.findByRole('heading', { name: '模型与连接' })).not.toBeNull();
+    expect(JSON.stringify(vi.mocked(api.setFirstRunResumeStep).mock.calls)).not.toMatch(/key|secret|credential/iu);
+  });
+
+  it('offers recheck, settings, repair guidance, and a non-blocking later path', async () => {
+    const api = port();
+    const onOpenEnvironmentSettings = vi.fn();
+    renderWizard({ api, initialStep: 'environment', onOpenEnvironmentSettings });
+    await screen.findByText('Git Bash');
+
+    expect(screen.getByRole('link', { name: '查看修复说明' }).getAttribute('href')).toMatch(/^https:\/\//u);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('button', { name: '打开设置' }));
+    expect(onOpenEnvironmentSettings).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole('button', { name: '重新检测' }));
+    await waitFor(() => expect(api.checkEnvironment).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole('button', { name: '稍后处理' })).not.toBeNull();
+  });
+
   it('does not present an unresolved Planner result after project A -> B -> A incarnation changes', async () => {
     setLocale('en-US');
     const pending = deferred<Workflow>();

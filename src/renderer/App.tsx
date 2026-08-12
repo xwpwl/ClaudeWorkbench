@@ -41,6 +41,7 @@ import {
   shouldShowLegacyEnvironmentCheck,
   type FirstRunGate,
 } from './firstRunGate';
+import type { FirstRunResumeStep } from '../shared/types/ipc';
 
 const WorkspaceRightDrawer = React.lazy(async () => {
   const module = await import('./features/git/WorkspaceRightDrawer');
@@ -558,6 +559,7 @@ export default function App() {
   const [settingsProject, setSettingsProject] = useState<Project | null>(null);
   const [settingsInitialCategory, setSettingsInitialCategory] = useState<SettingsCategory>('general');
   const [firstRunGate, setFirstRunGate] = useState<FirstRunGate>('booting');
+  const [firstRunResumeStep, setFirstRunResumeStep] = useState<FirstRunResumeStep>('welcome');
   const [firstRunProjectIncarnation, setFirstRunProjectIncarnation] = useState(0);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [taskSnapshot, setTaskSnapshot] = useState<PersistedTaskSnapshot | null>(null);
@@ -581,6 +583,10 @@ export default function App() {
     listModelProviders: () => window.api.listModelProviders(),
     onModelProviderChanged: (listener: () => void) => window.api.onModelProviderChanged(() => listener()),
     createFirstRunTestProject: () => window.api.createFirstRunTestProject(),
+    setFirstRunResumeStep: async (step: FirstRunResumeStep) => {
+      await window.api.setFirstRunResumeStep(step);
+      setFirstRunResumeStep(step);
+    },
     setFirstRunCompletedVersion: (version: 1) => window.api.setFirstRunCompletedVersion(version),
   }), []);
   const dragStartRef = useRef({ y: 0, size: 0 });
@@ -919,12 +925,14 @@ export default function App() {
     if (initializedRef.current) return;
     initializedRef.current = true;
     void (async () => {
-      const [installation, settings, gate] = await Promise.all([
+      const [installation, settings, gate, resumeStep] = await Promise.all([
         window.api.checkInstallation().catch(() => null),
         window.api.getSettings().catch(() => null),
         loadFirstRunGate(() => window.api.getFirstRunCompletedVersion()),
+        window.api.getFirstRunResumeStep().catch(() => 'welcome' as const),
       ]);
       setFirstRunGate(gate);
+      setFirstRunResumeStep(resumeStep);
       if (installation) {
         setClaudeInstalled(installation.installed);
         setShowEnvCheck(shouldShowLegacyEnvironmentCheck(installation.installed, gate));
@@ -1734,9 +1742,11 @@ export default function App() {
         <FirstRunWizard
           api={firstRunWizardApi}
           completionReadFailed={firstRunGate === 'read_failed'}
+          initialStep={firstRunResumeStep}
           initialProject={currentProject}
           projectIncarnation={firstRunProjectIncarnation}
           onOpenProviderCenter={() => openSettingsCategory('models')}
+          onOpenEnvironmentSettings={() => openSettingsCategory('terminal_tools')}
           onOpenProject={openFirstRunProject}
           onSelectProject={selectFirstRunProject}
           onStartPlanner={startFirstRunPlannerInWorkspace}
@@ -1751,6 +1761,11 @@ export default function App() {
             setSettingsInitialCategory('general');
           }}
           onOpenProject={handleOpenProject}
+          onOpenProjectSettings={(project) => setSettingsProject(project)}
+          onRerunFirstRun={() => {
+            setFirstRunResumeStep('welcome');
+            setFirstRunGate('required');
+          }}
           onOpenIntegrations={(project, initialTab) => {
             setIntegrationsInitialTab(initialTab);
             setIntegrationsProject(project);

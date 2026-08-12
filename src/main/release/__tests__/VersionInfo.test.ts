@@ -5,6 +5,8 @@ describe('buildVersionInfo', () => {
   it('returns the release version and safe CI metadata', () => {
     expect(buildVersionInfo({
       version: '1.0.0', electronVersion: '35.6.0', packaged: true,
+      nodeVersion: '24.1.0', sqliteSchemaVersion: 7,
+      agentRuntime: 'claude-code',
       environment: {
         WORKBENCH_BUILD_ID: 'win-x64-1042',
         WORKBENCH_COMMIT: '0123456789abcdef',
@@ -12,8 +14,20 @@ describe('buildVersionInfo', () => {
       },
     })).toEqual({
       version: '1.0.0', buildId: 'win-x64-1042', commit: '0123456789abcdef',
-      channel: 'stable', electronVersion: '35.6.0', packaged: true,
+      channel: 'stable', electronVersion: '35.6.0', nodeVersion: '24.1.0',
+      sqliteSchemaVersion: 7, agentRuntime: 'claude-code', packaged: true,
     });
+  });
+
+  it('does not expose the private data directory in diagnostic version metadata', () => {
+    const input = {
+      version: '1.0.0', packaged: true, environment: {},
+      dataDirectory: 'C:\\private\\WorkbenchData',
+    };
+    const info = buildVersionInfo(input);
+
+    expect(info).not.toHaveProperty('dataDirectory');
+    expect(JSON.stringify(info)).not.toContain('WorkbenchData');
   });
 
   it('uses deterministic packaged fallbacks when CI metadata is absent', () => {
@@ -42,4 +56,3 @@ describe('buildVersionInfo', () => {
     expect(JSON.stringify(info)).not.toContain('do-not-copy');
   });
 });
-

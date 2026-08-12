@@ -38,6 +38,35 @@ export function EnvironmentStatusList({ result, compact = false, showInstallLink
       installUrl: null,
     },
     { key: 'shell', label: t('env.defaultShell'), ok: result.shell.ok, detail: result.shell.name, installUrl: null },
+    {
+      key: 'claude-configuration',
+      label: t('env.claudeConfiguration'),
+      ok: result.claudeConfiguration.ok,
+      detail: result.claudeConfiguration.source === 'environment'
+        ? t('env.environmentConfiguration')
+        : result.claudeConfiguration.source === 'claude_cli'
+          ? t('env.claudeLogin')
+          : null,
+      installUrl: null,
+    },
+    {
+      key: 'providers',
+      label: t('env.runnableProviders'),
+      ok: result.providers.runnable > 0,
+      detail: t('env.providerCount').replace('{count}', String(result.providers.runnable)),
+      installUrl: null,
+    },
+    { key: 'data-directory', label: t('env.dataDirectory'), ok: result.dataDirectory.ok, detail: result.dataDirectory.writable ? t('env.writable') : null, installUrl: null },
+    { key: 'sqlite', label: t('env.sqlite'), ok: result.sqlite.ok, detail: result.sqlite.schemaVersion === null ? null : `v${result.sqlite.schemaVersion}`, installUrl: null },
+    {
+      key: 'build-tools',
+      label: t('env.buildTools'),
+      ok: result.buildTools.required ? result.buildTools.ok === true : true,
+      detail: result.buildTools.required
+        ? result.buildTools.ok ? t('env.detected') : null
+        : t('env.notRequired'),
+      installUrl: null,
+    },
   ];
 
   return (
@@ -105,7 +134,12 @@ export function EnvironmentCheck({ onClose }: EnvironmentCheckProps) {
     result.claude.ok &&
     result.git.ok &&
     result.gitBash.ok &&
-    result.shell.ok;
+    result.shell.ok &&
+    result.claudeConfiguration.ok &&
+    result.providers.runnable > 0 &&
+    result.dataDirectory.ok &&
+    result.sqlite.ok &&
+    (!result.buildTools.required || result.buildTools.ok === true);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center animate-fade-in" style={{ backgroundColor: 'var(--bg-overlay)' }}>

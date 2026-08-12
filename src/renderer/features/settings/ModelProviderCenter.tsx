@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   Check,
@@ -8,6 +8,7 @@ import {
   Pencil,
   Power,
   RefreshCw,
+  Search,
   Server,
   ShieldCheck,
   Trash2,
@@ -46,8 +47,20 @@ import {
   supportedUseLabels,
 } from './modelProviderPresentation';
 import { t } from '../../i18n';
+import { computeVirtualWindow } from '../../performance/virtualization';
 
 const PAGE_SIZE = 25;
+const MODEL_ROW_HEIGHT = 36;
+const MODEL_LIST_HEIGHT = 216;
+
+export function filterProviderModels(models: ProviderModel[], query: string): ProviderModel[] {
+  const normalized = query.trim().toLocaleLowerCase();
+  if (!normalized) return models;
+  return models.filter((model) => (
+    model.modelId.toLocaleLowerCase().includes(normalized)
+    || model.displayName?.toLocaleLowerCase().includes(normalized)
+  ));
+}
 
 type ProviderBusyAction = 'load' | 'test' | 'refresh_models' | 'default' | 'enabled' | 'delete' | null;
 
@@ -662,6 +675,66 @@ export interface ProviderDetailsProps {
   onDelete(): void;
 }
 
+function ProviderModelList({ models }: { models: ProviderModel[] }) {
+  const [query, setQuery] = useState('');
+  const [scrollTop, setScrollTop] = useState(0);
+  const filtered = useMemo(() => filterProviderModels(models, query), [models, query]);
+  const window = computeVirtualWindow({
+    itemCount: filtered.length,
+    itemHeight: MODEL_ROW_HEIGHT,
+    viewportHeight: MODEL_LIST_HEIGHT,
+    scrollTop,
+    overscan: 3,
+  });
+  const visible = filtered.slice(window.start, window.end);
+
+  return (
+    <div className="space-y-2">
+      <label className="relative block">
+        <Search size={13} aria-hidden="true" className="absolute left-2.5 top-1/2 -translate-y-1/2" style={{ color: 'var(--text-tertiary)' }} />
+        <input
+          type="search"
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            setScrollTop(0);
+          }}
+          aria-label={t('provider.details.searchModels')}
+          placeholder={t('provider.details.searchModels')}
+          className="w-full rounded-lg border py-2 pl-8 pr-3 text-xs outline-none"
+          style={{ borderColor: 'var(--border-secondary)', background: 'var(--bg-input)', color: 'var(--text-primary)' }}
+        />
+      </label>
+      {filtered.length === 0 ? (
+        <p className="rounded-lg border px-3 py-4 text-center text-xs" style={{ borderColor: 'var(--border-secondary)', color: 'var(--text-tertiary)' }}>
+          {t('provider.details.noMatchingModels')}
+        </p>
+      ) : (
+        <div
+          data-virtualized="true"
+          className="overflow-y-auto rounded-lg border text-xs"
+          style={{ borderColor: 'var(--border-secondary)', height: MODEL_LIST_HEIGHT }}
+          onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
+        >
+          <ul className="relative" style={{ height: window.totalHeight }}>
+            {visible.map((model, index) => (
+              <li
+                key={`${model.providerId}:${model.modelId}`}
+                data-testid="provider-model-item"
+                className="absolute left-0 right-0 flex items-center justify-between gap-3 border-b px-3 py-2"
+                style={{ borderColor: 'var(--border-secondary)', height: MODEL_ROW_HEIGHT, top: (window.start + index) * MODEL_ROW_HEIGHT }}
+              >
+                <span className="min-w-0 truncate">{model.displayName ? `${model.displayName} · ` : ''}{model.modelId}</span>
+                <span className="shrink-0" style={{ color: 'var(--text-tertiary)' }}>{model.source === 'manual' ? t('provider.details.manual') : t('provider.details.discovered')}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ProviderDetails({
   provider,
   models,
@@ -770,14 +843,7 @@ export function ProviderDetails({
           <section>
             <h5 className="mb-2 text-xs font-semibold" style={{ color: 'var(--text-secondary)' }}>{t('provider.details.modelList')}</h5>
             {models.length === 0 ? <p className="text-xs" style={{ color: 'var(--text-tertiary)' }}>{t('provider.details.noModels')}</p> : (
-              <ul className="divide-y rounded-lg border text-xs" style={{ borderColor: 'var(--border-secondary)' }}>
-                {models.map((model) => (
-                  <li key={`${model.providerId}:${model.modelId}`} className="flex items-center justify-between gap-3 px-3 py-2" style={{ borderColor: 'var(--border-secondary)' }}>
-                    <span className="min-w-0 truncate">{model.displayName ? `${model.displayName} · ` : ''}{model.modelId}</span>
-                    <span className="shrink-0" style={{ color: 'var(--text-tertiary)' }}>{model.source === 'manual' ? t('provider.details.manual') : t('provider.details.discovered')}</span>
-                  </li>
-                ))}
-              </ul>
+              <ProviderModelList models={models} />
             )}
           </section>
         </div>

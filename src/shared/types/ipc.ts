@@ -259,6 +259,8 @@ export const IPC_CHANNELS = {
   SETTINGS_SET: 'settings:set',
   FIRST_RUN_GET_COMPLETED_VERSION: 'first-run:get-completed-version',
   FIRST_RUN_SET_COMPLETED_VERSION: 'first-run:set-completed-version',
+  FIRST_RUN_GET_RESUME_STEP: 'first-run:get-resume-step',
+  FIRST_RUN_SET_RESUME_STEP: 'first-run:set-resume-step',
 
   // Release / updates
   RELEASE_GET_VERSION: 'release:get-version',
@@ -500,6 +502,8 @@ export interface ClaudeWorkbenchAPI {
   setSettings(settings: Partial<AppSettings>): Promise<void>;
   getFirstRunCompletedVersion(): Promise<number>;
   setFirstRunCompletedVersion(version: 1): Promise<void>;
+  getFirstRunResumeStep(): Promise<FirstRunResumeStep>;
+  setFirstRunResumeStep(step: FirstRunResumeStep): Promise<void>;
 
   // Release / updates
   getReleaseVersion(): Promise<ReleaseVersionInfo>;
@@ -672,6 +676,8 @@ export const CLAUDE_WORKBENCH_API_METHOD_KINDS = Object.freeze({
   setSettings: 'promise',
   getFirstRunCompletedVersion: 'promise',
   setFirstRunCompletedVersion: 'promise',
+  getFirstRunResumeStep: 'promise',
+  setFirstRunResumeStep: 'promise',
   getReleaseVersion: 'promise',
   getUpdateState: 'promise',
   checkForUpdates: 'promise',
@@ -792,12 +798,25 @@ export interface AppSettings {
   autoCheckUpdates: boolean;
 }
 
+export const FIRST_RUN_RESUME_STEPS = [
+  'welcome',
+  'environment',
+  'provider',
+  'project',
+  'first_task',
+] as const;
+
+export type FirstRunResumeStep = (typeof FIRST_RUN_RESUME_STEPS)[number];
+
 export interface ReleaseVersionInfo {
   version: string;
   buildId: string;
   commit: string;
   channel: string;
   electronVersion: string;
+  nodeVersion: string;
+  sqliteSchemaVersion: number;
+  agentRuntime: 'claude-code';
   packaged: boolean;
 }
 
@@ -825,6 +844,11 @@ export interface EnvironmentCheckResult {
   gitBash: { ok: boolean; path: string | null; configured: boolean };
   shell: { ok: boolean; name: string | null; path: string | null };
   projectDir: { ok: boolean; readable: boolean; writable: boolean };
+  claudeConfiguration: { ok: boolean; source: 'environment' | 'claude_cli' | null };
+  buildTools: { required: boolean; ok: boolean | null };
+  providers: { runnable: number };
+  dataDirectory: { ok: boolean; writable: boolean };
+  sqlite: { ok: boolean; schemaVersion: number | null };
 }
 
 /** Connection status — NO secrets exposed to renderer */

@@ -685,6 +685,12 @@ const api: ClaudeWorkbenchAPI = {
   setFirstRunCompletedVersion: (version: 1): Promise<void> =>
     ipcRenderer.invoke(IPC_CHANNELS.FIRST_RUN_SET_COMPLETED_VERSION, version),
 
+  getFirstRunResumeStep: () =>
+    ipcRenderer.invoke(IPC_CHANNELS.FIRST_RUN_GET_RESUME_STEP),
+
+  setFirstRunResumeStep: (step) =>
+    ipcRenderer.invoke(IPC_CHANNELS.FIRST_RUN_SET_RESUME_STEP, step),
+
   // Release / updates
   getReleaseVersion: () => ipcRenderer.invoke(IPC_CHANNELS.RELEASE_GET_VERSION),
   getUpdateState: () => ipcRenderer.invoke(IPC_CHANNELS.RELEASE_GET_UPDATE_STATE),

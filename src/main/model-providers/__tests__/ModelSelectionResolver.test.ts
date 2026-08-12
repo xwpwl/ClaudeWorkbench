@@ -869,12 +869,12 @@ describe('ModelSelectionResolver project inspection and trusted switch options',
       {
         providerId: 'provider-default', providerName: 'Default Provider',
         modelId: 'default-model', modelDisplayName: null, runtimeType: 'claude-code',
-        purpose: 'task_agent_override', source: 'configured_provider',
+        connectionState: 'connected', purpose: 'task_agent_override', source: 'configured_provider',
       },
       {
         providerId: 'provider-task', providerName: 'Task Provider',
         modelId: 'task-model', modelDisplayName: null, runtimeType: 'claude-code',
-        purpose: 'task_agent_override', source: 'configured_provider',
+        connectionState: 'connected', purpose: 'task_agent_override', source: 'configured_provider',
       },
     ]));
     expect(JSON.stringify(result)).not.toMatch(/DeepSeek|deepseek|synthetic:|forged-ownership|credential|baseUrl|capabilities/iu);

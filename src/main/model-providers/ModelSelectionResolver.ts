@@ -237,6 +237,7 @@ export class ModelSelectionResolver {
             modelId: model.modelId,
             modelDisplayName: model.displayName,
             runtimeType: 'claude-code',
+            connectionState: 'connected',
             purpose: 'task_agent_override',
             source: 'configured_provider',
           });

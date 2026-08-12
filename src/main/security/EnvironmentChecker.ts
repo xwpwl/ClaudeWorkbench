@@ -14,6 +14,11 @@ export function checkEnvironment(): EnvironmentCheckResult {
     gitBash: { ok: false, path: null, configured: false },
     shell: { ok: false, name: null, path: null },
     projectDir: { ok: false, readable: false, writable: false },
+    claudeConfiguration: { ok: false, source: null },
+    buildTools: { required: false, ok: null },
+    providers: { runnable: 0 },
+    dataDirectory: { ok: false, writable: false },
+    sqlite: { ok: false, schemaVersion: null },
   };
 
   // Check Node.js

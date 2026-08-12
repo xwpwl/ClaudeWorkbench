@@ -43,6 +43,34 @@ function harness(stored: Record<string, string> = {}) {
 }
 
 describe('first-run completion version IPC', () => {
+  it.each([
+    ['welcome', 'welcome'],
+    ['environment', 'environment'],
+    ['provider', 'provider'],
+    ['project', 'project'],
+    ['first_task', 'first_task'],
+  ] as const)('round-trips the closed resume step %s without a draft payload', async (step, expected) => {
+    const test = harness({ firstRunResumeStep: step });
+    await expect(test.invoke(IPC_CHANNELS.FIRST_RUN_GET_RESUME_STEP)).resolves.toBe(expected);
+    await expect(test.invoke(IPC_CHANNELS.FIRST_RUN_SET_RESUME_STEP, step)).resolves.toBeUndefined();
+    expect(test.database.setSetting).toHaveBeenCalledWith('firstRunResumeStep', step);
+  });
+
+  it.each([undefined, '', 'api-key-draft', 'completing', 'done'])('%s fails closed to welcome', async (step) => {
+    const stored = step === undefined ? {} : { firstRunResumeStep: step };
+    await expect(harness(stored).invoke(IPC_CHANNELS.FIRST_RUN_GET_RESUME_STEP)).resolves.toBe('welcome');
+  });
+
+  it.each([undefined, null, {}, 'done', 'provider\u0000secret'])('rejects invalid resume step %#', async (step) => {
+    const test = harness();
+    await expect(
+      step === undefined
+        ? test.invoke(IPC_CHANNELS.FIRST_RUN_SET_RESUME_STEP)
+        : test.invoke(IPC_CHANNELS.FIRST_RUN_SET_RESUME_STEP, step),
+    ).rejects.toThrow('Invalid first-run resume step.');
+    expect(test.database.setSetting).not.toHaveBeenCalled();
+  });
+
   it.each([undefined, '', 'malformed', '-1', '1.5'])('normalizes %s to version zero', async (value) => {
     const test = harness(value === undefined ? {} : { firstRunCompletedVersion: value });
     await expect(test.invoke(IPC_CHANNELS.FIRST_RUN_GET_COMPLETED_VERSION)).resolves.toBe(0);
@@ -110,6 +138,8 @@ describe('first-run completion version IPC', () => {
   it('keeps the generic settings surface closed to completion ownership state', async () => {
     const test = harness();
     await expect(test.invoke(IPC_CHANNELS.SETTINGS_SET, { firstRunCompletedVersion: 1 }))
+      .rejects.toThrow(/unsupported|unknown/iu);
+    await expect(test.invoke(IPC_CHANNELS.SETTINGS_SET, { firstRunResumeStep: 'provider' }))
       .rejects.toThrow(/unsupported|unknown/iu);
     expect(test.database.setSetting).not.toHaveBeenCalled();
   });

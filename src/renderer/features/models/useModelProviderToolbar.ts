@@ -107,6 +107,7 @@ function safeTaskOption(value: TaskModelSwitchOptionPublic): TaskModelSwitchOpti
     modelId: value.modelId,
     modelDisplayName: value.modelDisplayName,
     runtimeType: value.runtimeType,
+    connectionState: value.connectionState === 'connected' ? 'connected' : undefined,
     purpose: value.purpose ?? 'task_agent_override',
     source: value.source ?? 'configured_provider',
   };
