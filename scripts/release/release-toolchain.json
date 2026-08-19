@@ -56,7 +56,7 @@
     "powershellSystem32RelativePath": "WindowsPowerShell\\v1.0\\powershell.exe",
     "powershellSha256": "7600ffe12da441fe89d035b13801e8e91d064bc544a27b19a5cf49f6ab8b18f5",
     "cmdSystem32RelativePath": "cmd.exe",
-    "cmdSha256": "65ec268add3973b6dca64222985da47caeaee44a340b0ec1466782914fd743d9",
+    "cmdSha256": "8dd1ebb0b969370c70a5ee7f7ee347949aa7046aa5e1a33fcd7b1e9415b21fc3",
     "killOnJobClose": true,
     "allowBreakaway": false
   },

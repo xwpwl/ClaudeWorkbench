@@ -194,7 +194,7 @@ function validatePolicy(policy) {
     && policy.windowsController.powershellSystem32RelativePath === 'WindowsPowerShell\\v1.0\\powershell.exe'
     && policy.windowsController.powershellSha256 === '7600ffe12da441fe89d035b13801e8e91d064bc544a27b19a5cf49f6ab8b18f5'
     && policy.windowsController.cmdSystem32RelativePath === 'cmd.exe'
-    && policy.windowsController.cmdSha256 === '65ec268add3973b6dca64222985da47caeaee44a340b0ec1466782914fd743d9'
+    && policy.windowsController.cmdSha256 === '8dd1ebb0b969370c70a5ee7f7ee347949aa7046aa5e1a33fcd7b1e9415b21fc3'
     && policy.windowsController.killOnJobClose === true
     && policy.windowsController.allowBreakaway === false
     && exactObject(policy.dependencyBootstrap, ['electronExecutableSha256', 'finalTree', 'installArguments', 'lifecyclePayloads', 'preLifecycleTree'])
@@ -1733,9 +1733,10 @@ function parseWorktreeFacts(bytes, includePrivatePath = false) {
     if (field === '') continue
     if (field.startsWith('worktree ')) {
       if (current) rows.push(current)
-      current = { path: field.slice(9), head: null, branch: null, bare: false, locked: false }
+      current = { path: field.slice(9), head: null, branch: null, bare: false, locked: false, detached: false }
     } else if (current && field.startsWith('HEAD ')) current.head = field.slice(5)
-    else if (current && field.startsWith('branch ')) current.branch = field.slice(7)
+    else if (current && field.startsWith('branch ') && current.branch === null && current.detached === false) current.branch = field.slice(7)
+    else if (current && field === 'detached' && current.branch === null && current.detached === false) current.detached = true
     else if (current && field === 'bare') current.bare = true
     else if (current && field.startsWith('locked')) current.locked = true
     else if (current && field.startsWith('prunable')) { }

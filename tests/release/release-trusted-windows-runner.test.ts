@@ -25,6 +25,9 @@ const reviewedNode = 'C:\\Program Files\\nodejs\\node.exe'
 const reviewedGit = 'C:\\Program Files\\Git\\cmd\\git.exe'
 const reviewedProgramFiles = 'C:\\Program Files'
 const reviewedSystem32 = 'C:\\Windows\\System32'
+const reviewedPowerShellSecurityModule = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Security\\Microsoft.PowerShell.Security.psd1'
+const reviewedCmdSha256 = '8dd1ebb0b969370c70a5ee7f7ee347949aa7046aa5e1a33fcd7b1e9415b21fc3'
+const retiredCmdSha256 = '65ec268add3973b6dca64222985da47caeaee44a340b0ec1466782914fd743d9'
 const expectedDescriptorLiteralSha256 = '6183a3f4bc00afdd05edc720f011ed09760d428fbea4251caf8a6b9c7645e293'
 const baselineDescriptorLiteralSha256 = 'a298457b298aca67613b2a64975e16c04c4d3bfa7fcaeb8ca98162d3ecf7ef19'
 const baselineDescriptorRowsJson = String.raw`[
@@ -303,6 +306,13 @@ async function extractedMachineParser(): Promise<(row: { parser: string }, resul
   const body = names.map((name) => extractNamedFunction(source, name)).join('\n')
   const context = vm.createContext({ Buffer, JSON, Number, Object, Set, TextDecoder })
   return new vm.Script(`${body}\nparseDescriptorResult`).runInContext(context)
+}
+
+async function extractedWorktreeParser(): Promise<(bytes: Uint8Array, includePrivatePath?: boolean) => unknown> {
+  const source = await fs.readFile(runnerPath, 'utf8')
+  const body = extractNamedFunction(source, 'parseWorktreeFacts')
+  const context = vm.createContext({ TextDecoder })
+  return new vm.Script(`const COMMIT_SHA = /^[a-f0-9]{40,64}$/u\n${body}\nparseWorktreeFacts`).runInContext(context)
 }
 
 async function extractedReporterIncrement(): Promise<(value: number) => number> {
@@ -1016,6 +1026,67 @@ async function checkNodeSyntax(filePath: string): Promise<{ code: number | null,
   })
 }
 
+async function inspectCmdAuthenticode(filePath: string): Promise<{
+  path: string
+  reparsePoint: boolean
+  sha256: string
+  status: string
+  signer: string | null
+  chainBuilt: boolean
+  chainErrors: number
+}> {
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    `Import-Module -Name '${reviewedPowerShellSecurityModule.replaceAll("'", "''")}' -Force`,
+    `$path = '${filePath.replaceAll("'", "''")}'`,
+    '$item = Get-Item -LiteralPath $path -Force',
+    '$signature = Get-AuthenticodeSignature -LiteralPath $path',
+    '$chainBuilt = $false',
+    '$chainErrors = 0',
+    '$signer = $null',
+    'if ($null -ne $signature.SignerCertificate) {',
+    '  $signer = $signature.SignerCertificate.Subject',
+    '  $chain = [Security.Cryptography.X509Certificates.X509Chain]::new()',
+    '  try {',
+    '    $chain.ChainPolicy.RevocationMode = [Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck',
+    '    $chain.ChainPolicy.VerificationFlags = [Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag',
+    '    $chainBuilt = $chain.Build($signature.SignerCertificate)',
+    '    $chainErrors = @($chain.ChainStatus).Count',
+    '  } finally { $chain.Dispose() }',
+    '}',
+    '$stream = [IO.File]::OpenRead($path)',
+    '$hasher = [Security.Cryptography.SHA256]::Create()',
+    'try { $sha256 = ([BitConverter]::ToString($hasher.ComputeHash($stream))).Replace("-", "").ToLowerInvariant() }',
+    'finally { $hasher.Dispose(); $stream.Dispose() }',
+    '[ordered]@{',
+    '  path = $item.FullName',
+    '  reparsePoint = (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)',
+    '  sha256 = $sha256',
+    '  status = [string]$signature.Status',
+    '  signer = $signer',
+    '  chainBuilt = $chainBuilt',
+    '  chainErrors = $chainErrors',
+    '} | ConvertTo-Json -Compress',
+  ].join('\n')
+  return await new Promise((resolve, reject) => {
+    const child = spawn(reviewedPowerShell, [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script,
+    ], { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    const stdout: Buffer[] = []
+    const stderr: Buffer[] = []
+    child.stdout.on('data', (chunk) => stdout.push(Buffer.from(chunk)))
+    child.stderr.on('data', (chunk) => stderr.push(Buffer.from(chunk)))
+    child.once('error', reject)
+    child.once('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`cmd Authenticode probe failed (${code}): ${Buffer.concat(stderr).toString('utf8')}`))
+        return
+      }
+      try { resolve(JSON.parse(Buffer.concat(stdout).toString('utf8'))) } catch (error) { reject(error) }
+    })
+  })
+}
+
 async function createControllerTreeFixture(mode: 'timeout' | 'stdout' | 'stderr'): Promise<{
   markerPath: string
   request: Record<string, unknown>
@@ -1266,6 +1337,10 @@ describe('reviewed release toolchain policy', () => {
         totalBytes: 187_055_518,
         treeSha256: '249a931b5352181774f454e5c96e72fe4d39bdbf530b5713fe2cd8ef16d42ef5',
       },
+      windowsController: {
+        cmdSystem32RelativePath: 'cmd.exe',
+        cmdSha256: reviewedCmdSha256,
+      },
     })
     expect(Object.isFrozen(policy.nativeAbi)).toBe(true)
     expect(Object.isFrozen(policy.nativeAbi.hostNode)).toBe(true)
@@ -1319,6 +1394,27 @@ describe('reviewed release toolchain policy', () => {
     expect(Object.isFrozen(policy.dependencyBootstrap.lifecyclePayloads)).toBe(true)
     expect(Object.isFrozen(policy.dependencyBootstrap.lifecyclePayloads[0])).toBe(true)
     await expect(runner.loadReleaseToolchainPolicy({})).rejects.toThrow('Release toolchain policy request is invalid.')
+  })
+
+  it('keeps the reviewed System32 cmd hash identical in the policy and runner validator', async () => {
+    const policy = JSON.parse(await fs.readFile(policyPath, 'utf8'))
+    const source = await fs.readFile(runnerPath, 'utf8')
+    const validatorHashes = [...source.matchAll(/policy\.windowsController\.cmdSha256 === '([a-f0-9]{64})'/gu)]
+      .map((match) => match[1])
+
+    expect(policy.windowsController.cmdSha256).toBe(reviewedCmdSha256)
+    expect(validatorHashes).toEqual([reviewedCmdSha256])
+  })
+
+  it.each([
+    ['retired 26100.8737 baseline', retiredCmdSha256],
+    ['one-nibble reviewed hash drift', `${reviewedCmdSha256.slice(0, -1)}0`],
+  ])('rejects %s even when the fixed policy path is used', async (_label, cmdSha256) => {
+    const policy = JSON.parse(await fs.readFile(policyPath, 'utf8'))
+    policy.windowsController.cmdSha256 = cmdSha256
+    const url = await copyRunnerWorkspace(Buffer.from(`${JSON.stringify(policy)}\n`, 'utf8'))
+    const runner = await import(`${url.href}?cmd-baseline-mutation=${crypto.randomUUID()}`)
+    await expect(runner.loadReleaseToolchainPolicy()).rejects.toThrow('Release toolchain policy is invalid.')
   })
 
   it.each([
@@ -1679,6 +1775,51 @@ describe('trusted Windows runner production surface', () => {
     })
   }, 180_000)
 
+  it.runIf(process.platform === 'win32')('uses only the valid reviewed System32 cmd when caller environment names an invalid same-name substitute', async () => {
+    const realCmdPath = path.win32.join(reviewedSystem32, 'cmd.exe')
+    const evidence = await inspectCmdAuthenticode(realCmdPath)
+    expect(evidence).toEqual({
+      path: expect.stringMatching(/^C:\\Windows\\System32\\cmd\.exe$/iu),
+      reparsePoint: false,
+      sha256: reviewedCmdSha256,
+      status: 'Valid',
+      signer: expect.stringContaining('CN=Microsoft Windows'),
+      chainBuilt: true,
+      chainErrors: 0,
+    })
+
+    const parent = path.join(workspaceRoot, 'release-validation', 'task2c1-cmd-baseline-fixtures')
+    await fs.mkdir(parent, { recursive: true })
+    const root = await fs.mkdtemp(path.join(parent, 'invalid-substitute-'))
+    disposableRoots.push(root)
+    const substitutePath = path.join(root, 'cmd.exe')
+    const substituteBytes = await fs.readFile(realCmdPath)
+    substituteBytes[1024] ^= 1
+    await fs.writeFile(substitutePath, substituteBytes)
+    const substituteEvidence = await inspectCmdAuthenticode(substitutePath)
+    expect(substituteEvidence.sha256).not.toBe(reviewedCmdSha256)
+    expect(substituteEvidence.status).not.toBe('Valid')
+
+    const previousComspec = process.env.COMSPEC
+    const previousPath = process.env.PATH
+    process.env.COMSPEC = substitutePath
+    process.env.PATH = `${root};${previousPath ?? ''}`
+    try {
+      const runner = await import(`${runnerUrl.href}?cmd-substitute=${crypto.randomUUID()}`)
+      await expect(runner.runTrustedWindowsCommand('node-version')).resolves.toEqual({
+        status: 'PASS', category: null, exitCode: 0, value: 'v24.15.0',
+      })
+      await expect(runner.runTrustedWindowsCommand('node-version', substitutePath)).rejects.toThrow(
+        'Trusted command descriptor is invalid.',
+      )
+    } finally {
+      if (previousComspec === undefined) delete process.env.COMSPEC
+      else process.env.COMSPEC = previousComspec
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
+  }, 60_000)
+
   it('suppresses a repository-local fsmonitor command before asking Git for status', async () => {
     const fixture = await createGitRunnerWorkspace()
     const hookPath = path.join(fixture.root, 'untrusted-fsmonitor.cmd')
@@ -1743,6 +1884,33 @@ describe('trusted Windows runner production surface', () => {
       main: await gitIndexSnapshot(mainIndex),
     }).toEqual(before)
   }, 240_000)
+
+  it('accepts a canonical detached sibling worktree without treating it as private main', async () => {
+    const parse = await extractedWorktreeParser()
+    const mainHead = 'a'.repeat(40)
+    const detachedHead = 'b'.repeat(40)
+    const bytes = Buffer.from([
+      'worktree C:/reviewed/main',
+      `HEAD ${mainHead}`,
+      'branch refs/heads/main',
+      '',
+      'worktree C:/reviewed/baseline',
+      `HEAD ${detachedHead}`,
+      'detached',
+      '',
+    ].join('\0'), 'utf8')
+
+    expect(JSON.parse(JSON.stringify(parse(bytes)))).toEqual([
+      { head: mainHead, branch: 'refs/heads/main', bare: false, locked: false },
+      { head: detachedHead, branch: null, bare: false, locked: false },
+    ])
+  })
+
+  it('continues to reject unknown worktree porcelain fields', async () => {
+    const parse = await extractedWorktreeParser()
+    const bytes = Buffer.from(`worktree C:/reviewed/main\0HEAD ${'a'.repeat(40)}\0mystery\0`, 'utf8')
+    expect(() => parse(bytes)).toThrow('worktree-output')
+  })
 
   it('reports a replacement ref without allowing it to affect Git object reads', async () => {
     const fixture = await createGitRunnerWorkspace()
