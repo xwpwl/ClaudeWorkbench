@@ -750,11 +750,11 @@ describe('release TDD evidence', () => {
   });
 
   it('freezes the exact newly index-invisible paths for all twelve intent-to-add steps', async () => {
-    const expected = {
+    const expectedNewlyIndexInvisiblePaths = {
       'foundation-version-metadata': ['src/main/release/__tests__/ReleaseMetadata.test.ts', 'tests/release/release-metadata-script.test.ts', 'src/main/release/__tests__/VersionInfo.test.ts', 'src/shared/release-contract.json', 'src/shared/types/release.ts', 'src/main/release/ReleaseMetadata.ts', 'src/main/release/VersionInfo.ts', 'scripts/lib/release-metadata.mjs'],
       'foundation-installer': ['build-resources/installer.nsh', 'build-resources/app-update.yml', 'src/shared/update-bootstrap-contract.json', 'src/main/release/AppIcon.ts', 'src/main/release/UpdateBootstrapConfig.ts', 'scripts/generate-app-update-config.mjs', 'src/main/release/__tests__/InstallerConfig.test.ts', 'src/main/release/__tests__/AppIconPath.test.ts', 'tests/release/app-update-config.test.ts'],
       'foundation-release-ipc': ['src/main/ipc/__tests__/release.test.ts', 'src/preload/__tests__/index.test.ts', 'src/preload/__tests__/transport-surface.test.ts'],
-      'artifact-signing': ['src/shared/authenticode-command.json', 'src/shared/release-contract.json', 'src/main/release/AuthenticodeStatusReader.ts', 'src/main/release/RuntimeReleaseStatus.ts', 'src/main/release/__tests__/AuthenticodeStatusReader.test.ts', 'src/main/release/__tests__/RuntimeReleaseStatus.test.ts', 'scripts/release/lib/authenticode.mjs', 'scripts/release/signing.mjs', 'tests/release/release-signing.test.ts'],
+      'artifact-signing': ['src/shared/authenticode-command.json', 'src/main/release/AuthenticodeStatusReader.ts', 'src/main/release/RuntimeReleaseStatus.ts', 'src/main/release/__tests__/AuthenticodeStatusReader.test.ts', 'src/main/release/__tests__/RuntimeReleaseStatus.test.ts', 'scripts/release/lib/authenticode.mjs', 'scripts/release/signing.mjs', 'tests/release/release-signing.test.ts'],
       'artifact-sbom': ['scripts/release/lib/artifact-inventory.mjs', 'scripts/release/sbom.mjs', 'tests/release/release-sbom.test.ts'],
       'artifact-package-scans': ['scripts/release/manifest.mjs', 'scripts/release/verify.mjs', 'tests/release/release-manifest.test.ts', 'tests/release/release-verify.test.ts'],
       'updater-source-policy': ['src/main/release/UpdateSourcePolicy.ts', 'src/main/release/UpdateTransportGuard.ts', 'src/main/release/UpdateManager.ts', 'src/main/release/__tests__/UpdateSourcePolicy.test.ts', 'src/main/release/__tests__/UpdateTransportGuard.test.ts', 'src/main/release/__tests__/UpdateManager.test.ts'],
@@ -765,12 +765,17 @@ describe('release TDD evidence', () => {
       'beta-feedback': ['src/shared/types/feedback.ts', 'src/shared/feedback-config.json', 'src/main/feedback/BetaFeedbackService.ts', 'src/main/ipc/feedback.ts', 'src/main/feedback/__tests__/BetaFeedbackService.test.ts', 'src/main/ipc/__tests__/feedback.test.ts', 'src/preload/__tests__/public-ipc-transport.test.ts', 'src/renderer/__tests__/public-api-facade.test.ts'],
     };
     const sources = await Promise.all(PLAN_PATHS.map((plan) => fs.readFile(path.join(workspace, plan), 'utf8')));
-    const actual = Object.fromEntries(sources.flatMap((source) => [...source.matchAll(/Run: `git add -N -- ([^`]+)` \(intent-to-add for ([a-z-]+):[^\n]*\)\./gu)]
+    const actualNewlyIndexInvisiblePaths = Object.fromEntries(sources.flatMap((source) => [...source.matchAll(/Run: `git add -N -- ([^`]+)` \(intent-to-add for ([a-z-]+):[^\n]*\)\./gu)]
       .map((match) => [match[2], match[1].split(' ')])));
-    expect(actual).toEqual(expected);
+    const artifactSigningOwnedInputs = TDD_COMMAND_SLICES.find(({ commandId }) => commandId === 'artifact-signing')?.relatedSourcePaths;
+    expect(artifactSigningOwnedInputs).toContain('src/shared/release-contract.json');
+    expect(expectedNewlyIndexInvisiblePaths['artifact-signing']).not.toContain('src/shared/release-contract.json');
+    const trackedContract = await execFile('git', ['ls-files', '--error-unmatch', '--', 'src/shared/release-contract.json'], { cwd: workspace });
+    expect(trackedContract.stdout.trim()).toBe('src/shared/release-contract.json');
+    expect(actualNewlyIndexInvisiblePaths).toEqual(expectedNewlyIndexInvisiblePaths);
     const paired = sources.flatMap((source) => [...source.matchAll(/Run: `git add -N -- [^`]+` \(intent-to-add for ([a-z-]+):[^\n]*\)\.\r?\n\r?\nRun \(diagnostic green, not recorded\):/gu)]
       .map((match) => match[1]));
-    expect(paired).toEqual(Object.keys(expected));
+    expect(paired).toEqual(Object.keys(expectedNewlyIndexInvisiblePaths));
   });
 
   it('exports the complete final green order and one unambiguous last slice for every observed path', () => {
