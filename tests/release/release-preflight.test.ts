@@ -642,7 +642,7 @@ function makeDeps(state = newState()) {
             'before:build-preload', 'after:build-preload',
             'before:build-renderer', 'after:build-renderer',
           ]
-          const names = await fs.readdir(directory)
+          const names = [...new Set([...await fs.readdir(directory), ...virtualChildren(directory)])]
           return state.failAt === `dotenv:${positions[state.buildRootReads - 1]}` ? [...names, '.env'] : names
         }
         const names = await fs.readdir(directory)
