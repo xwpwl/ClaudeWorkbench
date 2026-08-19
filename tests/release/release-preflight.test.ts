@@ -136,10 +136,16 @@ const WORKSPACE_ENTRY_ROWS = [
   ['legacy-safety-test', 'src/main/database/__tests__/DatabaseLegacySafety.test.ts'],
   ['diagnostics-release-test', 'src/main/diagnostics/__tests__/DiagnosticsExporter.release.test.ts'],
 ] as const
+const REVIEWED_TASK2C1_RUNNER_SHA256 = '2c2967f3e19cf1ea96e9ac4ceb074ff1572ead1617e3aeae82c9e8cdd0e74f5a'
+const REVIEWED_TASK2C1_POLICY_SHA256 = 'fc50d2c63b4f3ea0049853ab6965fc96c6dc9397a35ab1b277a858b7b287eb8a'
+const PRE_TASK2C1_REVIEWED_INPUT_HASHES = Object.freeze({
+  'scripts/release/lib/trusted-windows-runner.mjs': '9bc7d0789fa581294d781d97035dadcd1f9b30876644674e91e15db14e0c2fd4',
+  'scripts/release/release-toolchain.json': '7bc34cc85df605d895c51a01613fbb94ad7c328fed15bf1aeae6090d48d1fa17',
+})
 const FIXED_WORKSPACE_HASHES: Readonly<Record<string, string>> = Object.freeze({
   'vitest-preflight-reporter': '3ac428e56102490c10db9f46670941056cf22192d8ae3b672916eff583b7e126',
-  'trusted-windows-runner': '9bc7d0789fa581294d781d97035dadcd1f9b30876644674e91e15db14e0c2fd4',
-  'release-toolchain-policy': '7bc34cc85df605d895c51a01613fbb94ad7c328fed15bf1aeae6090d48d1fa17',
+  'trusted-windows-runner': REVIEWED_TASK2C1_RUNNER_SHA256,
+  'release-toolchain-policy': REVIEWED_TASK2C1_POLICY_SHA256,
   'release-metadata': '4179fc0f9afd34b2a92c501a8d9116ed57453b3e912b48f1f5f9ce754ab4b332',
   'release-context': '7dc114be1619e3efbc56318ce79fad3f1e4ac7d1d487cb9a32372f49294f65e6',
   'release-common': 'f9e36d0dd5c40ef63c4a0b9ce5e2e8b49f973b3155bb4f54e06fc905971bc3a6',
@@ -166,8 +172,8 @@ const FIXED_GATE_HASHES = Object.freeze([
   ['docs/releases/1.0.1-rc.1.md', 'bfa0a4dcd5dc22ab614265c4df89d199cd7ee488c64d55821fe087a7b8d414fc'],
   ['src/shared/release-contract.json', '1f2f933c02d7e9044b1d8589bace6a98f76bdcd7559811c33f3e433562101fa2'],
   ['src/shared/update-bootstrap-contract.json', '664e5635d5ba212bf0a780eda10a98e1a01588bf4ecfeced395b2e18d69a1f44'],
-  ['scripts/release/release-toolchain.json', '7bc34cc85df605d895c51a01613fbb94ad7c328fed15bf1aeae6090d48d1fa17'],
-  ['scripts/release/lib/trusted-windows-runner.mjs', '9bc7d0789fa581294d781d97035dadcd1f9b30876644674e91e15db14e0c2fd4'],
+  ['scripts/release/release-toolchain.json', REVIEWED_TASK2C1_POLICY_SHA256],
+  ['scripts/release/lib/trusted-windows-runner.mjs', REVIEWED_TASK2C1_RUNNER_SHA256],
   ['scripts/generate-app-update-config.mjs', 'ae4421766bf24ec0b1ba23f97219eb2582b8aa29f6e711af94bc36277aadefb4'],
   ['scripts/generate-app-icons.mjs', '8ffa4aa293f85dfc5d78564e6817b5f675ec354fec0bb25c74f78aa23ecaeeaf'],
   ['docs/legal/ASSET-NOTICES.md', '87947993cd59c135080a06d0bfb31141b042f950a49e25e601c7098cc45aaa8a'],
@@ -1327,6 +1333,39 @@ describe('preflight production surface and private core', () => {
       },
     })
     const core = await extractedCore(makeDeps(state))
+    await expect(core.runEarlyGitPackageGate({ workspaceRoot })).rejects.toThrow(/fixed|reviewed|input/iu)
+    expect(state.calls).not.toContain('command:npm-ci-ignore-scripts')
+    expect(state.writes).toEqual([])
+  })
+
+  it.each([
+    ['complete pair', { ...PRE_TASK2C1_REVIEWED_INPUT_HASHES }],
+    ['runner only', {
+      'scripts/release/lib/trusted-windows-runner.mjs': PRE_TASK2C1_REVIEWED_INPUT_HASHES['scripts/release/lib/trusted-windows-runner.mjs'],
+      'scripts/release/release-toolchain.json': REVIEWED_TASK2C1_POLICY_SHA256,
+    }],
+    ['policy only', {
+      'scripts/release/lib/trusted-windows-runner.mjs': REVIEWED_TASK2C1_RUNNER_SHA256,
+      'scripts/release/release-toolchain.json': PRE_TASK2C1_REVIEWED_INPUT_HASHES['scripts/release/release-toolchain.json'],
+    }],
+  ])('rejects pre-Task2C1 reviewed-input hashes (%s) before npm or writes', async (_label, hashOverrides) => {
+    const state = newState({ hashOverrides })
+    const core = await extractedCore(makeDeps(state))
+
+    await expect(core.runEarlyGitPackageGate({ workspaceRoot })).rejects.toThrow(/fixed|reviewed|input/iu)
+    expect(state.calls).not.toContain('command:npm-ci-ignore-scripts')
+    expect(state.writes).toEqual([])
+  })
+
+  it('rejects swapped Task2C1 reviewed-input hashes before npm or writes', async () => {
+    const state = newState({
+      hashOverrides: {
+        'scripts/release/lib/trusted-windows-runner.mjs': REVIEWED_TASK2C1_POLICY_SHA256,
+        'scripts/release/release-toolchain.json': REVIEWED_TASK2C1_RUNNER_SHA256,
+      },
+    })
+    const core = await extractedCore(makeDeps(state))
+
     await expect(core.runEarlyGitPackageGate({ workspaceRoot })).rejects.toThrow(/fixed|reviewed|input/iu)
     expect(state.calls).not.toContain('command:npm-ci-ignore-scripts')
     expect(state.writes).toEqual([])
