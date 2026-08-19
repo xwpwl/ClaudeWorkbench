@@ -31,6 +31,7 @@
     "test:release-benchmark": "node scripts/release-benchmark.mjs",
     "test:release-security": "node scripts/release-security-checklist.mjs",
     "release:tdd-evidence": "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"[Console]::Error.WriteLine('Use the trusted System32 PowerShell launcher command from the Task 15 plans.'); exit 1\"",
+    "release:preflight": "node scripts/release/preflight.mjs",
     "test:installer:win": "node scripts/windows-installer-acceptance.mjs",
     "test:watch": "vitest",
     "lint": "eslint src --ext .ts,.tsx",
