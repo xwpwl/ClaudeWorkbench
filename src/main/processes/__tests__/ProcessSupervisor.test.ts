@@ -23,6 +23,7 @@ class FakeChild extends EventEmitter {
 
 function harness(options: {
   journalStart?: (record: ProcessStartRecord) => void | Promise<void>;
+  synchronousJournalStart?: boolean;
   journalExit?: (record: ProcessExitRecord) => void | Promise<void>;
   platform?: NodeJS.Platform;
   pid?: number;
@@ -45,10 +46,15 @@ function harness(options: {
     defaultGraceMs: 0,
     defaultForceMs: 25,
     journal: {
-      recordStarted: async (record) => {
-        starts.push(record);
-        await options.journalStart?.(record);
-      },
+      recordStarted: options.synchronousJournalStart
+        ? (record) => {
+          starts.push(record);
+          options.journalStart?.(record);
+        }
+        : async (record) => {
+          starts.push(record);
+          await options.journalStart?.(record);
+        },
       recordExited: async (record) => {
         exits.push(record);
         await options.journalExit?.(record);
@@ -105,6 +111,24 @@ describe('ProcessSupervisor', () => {
     expect(test.supervisor.getActiveProcesses()).toEqual([]);
   });
 
+  it('observes repeated close-only errors until close and records the first error', async () => {
+    const test = harness();
+    const handle = await test.supervisor.spawn({
+      id: 'repeated-errors', kind: 'claude', command: 'claude-test', settlement: 'close-only',
+    });
+    const child = test.children[0];
+
+    child.emit('error', new Error('first-error'));
+    expect(child.listenerCount('error')).toBe(1);
+    expect(() => child.emit('error', new Error('second-error'))).not.toThrow();
+    expect(test.supervisor.getActiveProcesses()).toHaveLength(1);
+
+    child.emit('close', null, null);
+    await expect(handle.waitForExit()).resolves.toMatchObject({ error: 'first-error' });
+    expect(child.listenerCount('error')).toBe(0);
+    expect(child.listenerCount('close')).toBe(0);
+  });
+
   it('keeps error-or-close settlement as the default', async () => {
     const test = harness();
     const handle = await test.supervisor.spawn({
@@ -138,6 +162,30 @@ describe('ProcessSupervisor', () => {
       await expect(spawning).rejects.toThrow(/did not provide a PID/i);
       expect(test.children[0].listenerCount('close')).toBe(0);
       expect(test.children[0].listenerCount('error')).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('observes repeated missing-PID errors until raw close', async () => {
+    vi.useFakeTimers();
+    try {
+      const test = harness({ pid: 0 });
+      const spawning = test.supervisor.spawn({
+        kind: 'claude', command: 'claude-test', settlement: 'close-only', closeTimeoutMs: 50,
+      });
+      void spawning.catch(() => undefined);
+      await Promise.resolve();
+
+      test.children[0].emit('error', new Error('first-missing-pid-error'));
+      expect(test.children[0].listenerCount('error')).toBe(1);
+      expect(() => test.children[0].emit('error', new Error('second-missing-pid-error'))).not.toThrow();
+      test.children[0].emit('close', null, 'SIGKILL');
+
+      await expect(spawning).rejects.toThrow(/did not provide a PID/i);
+      expect(test.children[0].listenerCount('error')).toBe(0);
+      expect(test.children[0].listenerCount('close')).toBe(0);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();
@@ -242,6 +290,60 @@ describe('ProcessSupervisor', () => {
       expect(test.children[0].kill).toHaveBeenCalledTimes(2);
       expect(test.children[0].listenerCount('close')).toBe(0);
       expect(test.children[0].listenerCount('error')).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('transfers synchronous start-journal failure cleanup without losing child ownership', async () => {
+    vi.useFakeTimers();
+    try {
+      const test = harness({
+        synchronousJournalStart: true,
+        journalStart: () => { throw new Error('synchronous-journal-secret'); },
+      });
+      const spawning = test.supervisor.spawn({
+        id: 'synchronous-journal-cleanup',
+        kind: 'claude',
+        command: 'command-secret',
+        args: ['argv-secret'],
+        options: { env: { TOKEN: 'env-secret' }, cwd: 'C:\\path-secret' },
+        settlement: 'close-only',
+        closeTimeoutMs: 25,
+      });
+      const captured = spawning.catch((caught: unknown) => caught);
+      await Promise.resolve();
+
+      expect(test.children[0].kill).toHaveBeenCalledWith('SIGKILL');
+      await vi.advanceTimersByTimeAsync(24);
+      let settled = false;
+      void captured.then(() => { settled = true; });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      const error = await captured as Error & {
+        code?: string;
+        cleanup?: { retryCleanup(options?: { forceMs?: number }): Promise<void> };
+      };
+      expect(error).toBeInstanceOf(ManagedProcessCleanupUnconfirmedError);
+      expect(error.code).toBe('MANAGED_PROCESS_CLEANUP_UNCONFIRMED');
+      expect(Reflect.ownKeys(error.cleanup ?? {})).toEqual(['retryCleanup']);
+      for (const forbidden of ['child', 'pid', 'kill', 'terminate', 'command', 'args', 'argv', 'env', 'environment', 'cwd', 'path']) {
+        expect(error).not.toHaveProperty(forbidden);
+        expect(error.cleanup).not.toHaveProperty(forbidden);
+      }
+
+      const firstRetry = error.cleanup!.retryCleanup({ forceMs: 40 });
+      const concurrentRetry = error.cleanup!.retryCleanup({ forceMs: 40 });
+      expect(test.children[0].kill).toHaveBeenCalledTimes(2);
+      test.children[0].emit('close', null, 'SIGKILL');
+      await expect(Promise.all([firstRetry, concurrentRetry])).resolves.toEqual([undefined, undefined]);
+      await expect(error.cleanup!.retryCleanup()).resolves.toBeUndefined();
+      expect(test.children[0].kill).toHaveBeenCalledTimes(2);
+      expect(test.children[0].listenerCount('error')).toBe(0);
+      expect(test.children[0].listenerCount('close')).toBe(0);
       expect(vi.getTimerCount()).toBe(0);
     } finally {
       vi.useRealTimers();

@@ -147,7 +147,7 @@ function observeRawClose(child: ChildProcess, observeError: boolean): RawCloseCo
     waiters.clear();
   };
   child.once('close', onClose);
-  if (observeError) child.once('error', onError);
+  if (observeError) child.on('error', onError);
 
   return {
     isClosed: () => closed,
@@ -261,7 +261,6 @@ export class ProcessSupervisor {
       pendingError: undefined,
       settlement,
     };
-    active.startJournal = Promise.resolve(this.journal.recordStarted({ ...start }));
     this.active.set(id, active);
 
     const finalize = (exitCode: number | null, signal: string | null, error?: unknown): void => {
@@ -280,11 +279,19 @@ export class ProcessSupervisor {
       finalize(null, null, error);
     };
     child.once('close', onClose);
-    child.once('error', onError);
+    if (settlement === 'close-only') child.on('error', onError);
+    else child.once('error', onError);
 
+    let startJournalAssigned = false;
     try {
+      active.startJournal = Promise.resolve(this.journal.recordStarted({ ...start }));
+      startJournalAssigned = true;
       await active.startJournal;
     } catch (error) {
+      if (!startJournalAssigned) {
+        active.startJournal = Promise.reject(error);
+        void active.startJournal.catch(() => undefined);
+      }
       this.active.delete(id);
       child.kill('SIGKILL');
       if (rawClose && !await rawClose.wait(closeTimeoutMs)) {
