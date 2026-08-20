@@ -900,7 +900,7 @@ try {
 
   $outerJob = New-KillOnCloseJob $api
   $outerArmed = $true
-  if (-not $api::AssignProcessToJobObject($outerJob, [Diagnostics.Process]::GetCurrentProcess().Handle)) { throw 'outer-assignment' }
+  if (-not $api::AssignProcessToJobObject($outerJob, $api::GetCurrentProcess())) { throw 'outer-assignment' }
   $innerJob = New-KillOnCloseJob $api
 
   foreach ($bound in $held) { Assert-BoundFile $api $bound }

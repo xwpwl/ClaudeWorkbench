@@ -674,8 +674,8 @@ async function runExactController(request: Record<string, unknown>): Promise<{ c
   return await runExactControllerBytes(Buffer.from(JSON.stringify(request) + '\n', 'utf8'))
 }
 
-async function runExactControllerBytes(requestBytes: Buffer): Promise<{ code: number | null, stdout: string, stderr: string }> {
-  const controller = await exactControllerSource()
+async function runExactControllerBytes(requestBytes: Buffer, controllerSource?: string): Promise<{ code: number | null, stdout: string, stderr: string }> {
+  const controller = controllerSource ?? await exactControllerSource()
   const controllerBytes = Buffer.from(controller, 'utf8')
   const controllerSha256 = crypto.createHash('sha256').update(controllerBytes).digest('hex')
   const encoded = Buffer.from(await exactLoaderSource(controllerSha256), 'utf16le').toString('base64')
@@ -725,6 +725,102 @@ async function runExactControllerBytes(requestBytes: Buffer): Promise<{ code: nu
       })
     })
     child.stdin.end(envelope + '\n')
+  })
+}
+
+type ProcessHandleLifetimeProbe = Readonly<{
+  assigned: boolean
+  assignmentErrorCode: number
+  errorCode: number
+  expectedProcessId: number
+  mode: 'pseudo' | 'rooted' | 'unrooted'
+  observedProcessId: number
+}>
+
+async function runProcessHandleLifetimeProbe(mode: ProcessHandleLifetimeProbe['mode']): Promise<ProcessHandleLifetimeProbe> {
+  const selectHandle = mode === 'unrooted'
+    ? [
+        'function Get-UnrootedProcessHandle {',
+        '  $temporary = [Diagnostics.Process]::GetCurrentProcess()',
+        '  return $temporary.Handle',
+        '}',
+        '$raw = Get-UnrootedProcessHandle',
+      ]
+    : mode === 'rooted'
+      ? [
+          '$owner = [Diagnostics.Process]::GetCurrentProcess()',
+          '$raw = $owner.Handle',
+        ]
+      : ['$raw = [HandleLifetimeProbeNative]::GetCurrentProcess()']
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$ProgressPreference = 'SilentlyContinue'",
+    "Add-Type -TypeDefinition @'",
+    'using System;',
+    'using System.Runtime.InteropServices;',
+    'public static class HandleLifetimeProbeNative {',
+    '  [DllImport("kernel32.dll", SetLastError=true)]',
+    '  public static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);',
+    '  [DllImport("kernel32.dll", SetLastError=true, CharSet=CharSet.Unicode)]',
+    '  public static extern IntPtr CreateJobObject(IntPtr attributes, string name);',
+    '  [DllImport("kernel32.dll")]',
+    '  public static extern bool CloseHandle(IntPtr handle);',
+    '  [DllImport("kernel32.dll", SetLastError=true)]',
+    '  public static extern uint GetProcessId(IntPtr process);',
+    '  [DllImport("kernel32.dll")]',
+    '  public static extern IntPtr GetCurrentProcess();',
+    '}',
+    "'@",
+    '$owner = $null',
+    ...selectHandle,
+    '[GC]::Collect()',
+    '[GC]::WaitForPendingFinalizers()',
+    '[GC]::Collect()',
+    '$observed = [HandleLifetimeProbeNative]::GetProcessId($raw)',
+    '$errorCode = if ($observed -eq 0) { [Runtime.InteropServices.Marshal]::GetLastWin32Error() } else { 0 }',
+    '$job = [HandleLifetimeProbeNative]::CreateJobObject([IntPtr]::Zero, $null)',
+    "if ($job -eq [IntPtr]::Zero) { throw 'job' }",
+    '$assigned = [HandleLifetimeProbeNative]::AssignProcessToJobObject($job, $raw)',
+    '$assignmentErrorCode = if (-not $assigned) { [Runtime.InteropServices.Marshal]::GetLastWin32Error() } else { 0 }',
+    '[void][HandleLifetimeProbeNative]::CloseHandle($job)',
+    'if ($null -ne $owner) { [GC]::KeepAlive($owner) }',
+    `[Console]::Out.Write((@{ mode='${mode}'; observedProcessId=$observed; errorCode=$errorCode; expectedProcessId=$PID; assigned=$assigned; assignmentErrorCode=$assignmentErrorCode } | ConvertTo-Json -Compress))`,
+  ].join('\n')
+  const encoded = Buffer.from(script, 'utf16le').toString('base64')
+  return await new Promise((resolve, reject) => {
+    const child = spawn(reviewedPowerShell, [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded,
+    ], {
+      cwd: workspaceRoot,
+      env: { LANG: 'C', LC_ALL: 'C' },
+      shell: false,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+    const stdout: Buffer[] = []
+    const stderr: Buffer[] = []
+    let settled = false
+    child.stdout.on('data', (chunk) => stdout.push(Buffer.from(chunk)))
+    child.stderr.on('data', (chunk) => stderr.push(Buffer.from(chunk)))
+    child.once('error', (error) => {
+      if (settled) return
+      settled = true
+      reject(error)
+    })
+    child.once('close', (code) => {
+      if (settled) return
+      settled = true
+      const stderrText = Buffer.concat(stderr).toString('utf8')
+      if (code !== 0) {
+        reject(new Error(`Process handle lifetime probe failed: ${stderrText}`))
+        return
+      }
+      try {
+        resolve(JSON.parse(Buffer.concat(stdout).toString('utf8')))
+      } catch (error) {
+        reject(error)
+      }
+    })
   })
 }
 
@@ -1722,6 +1818,40 @@ describe('trusted Windows runner production surface', () => {
     expect(controller).not.toContain('GetEffectiveRightsFromAclW')
     expect(controller.indexOf('$api::CreateProcessW')).toBeLessThan(controller.indexOf('$api::AssignProcessToJobObject($innerJob'))
     expect(controller.indexOf('$api::AssignProcessToJobObject($innerJob')).toBeLessThan(controller.indexOf('$api::ResumeThread($threadHandle)'))
+    if (process.platform === 'win32') {
+      const [unrooted, rooted, pseudo] = await Promise.all([
+        runProcessHandleLifetimeProbe('unrooted'),
+        runProcessHandleLifetimeProbe('rooted'),
+        runProcessHandleLifetimeProbe('pseudo'),
+      ])
+      expect(unrooted).toMatchObject({ mode: 'unrooted', observedProcessId: 0, errorCode: 6, assigned: false, assignmentErrorCode: 6 })
+      expect(rooted).toMatchObject({ mode: 'rooted', errorCode: 0, assigned: true, assignmentErrorCode: 0 })
+      expect(rooted.observedProcessId).toBe(rooted.expectedProcessId)
+      expect(pseudo).toMatchObject({ mode: 'pseudo', errorCode: 0, assigned: true, assignmentErrorCode: 0 })
+      expect(pseudo.observedProcessId).toBe(pseudo.expectedProcessId)
+
+      const exactController = await exactControllerSource()
+      const safeAssignment = "  if (-not $api::AssignProcessToJobObject($outerJob, $api::GetCurrentProcess())) { throw 'outer-assignment' }"
+      const unsafeAssignment = "  if (-not $api::AssignProcessToJobObject($outerJob, [Diagnostics.Process]::GetCurrentProcess().Handle)) { throw 'outer-assignment' }"
+      const assignment = exactController.includes(safeAssignment) ? safeAssignment : unsafeAssignment
+      expect(exactController).toContain(assignment)
+      const handleExpression = assignment === safeAssignment
+        ? '$api::GetCurrentProcess()'
+        : '[Diagnostics.Process]::GetCurrentProcess().Handle'
+      const stressedController = exactController.replace(assignment, [
+        `  $outerProcessHandle = ${handleExpression}`,
+        '  [GC]::Collect()',
+        '  [GC]::WaitForPendingFinalizers()',
+        '  [GC]::Collect()',
+        "  if (-not $api::AssignProcessToJobObject($outerJob, $outerProcessHandle)) { throw 'outer-assignment' }",
+      ].join('\n'))
+      const requestBytes = Buffer.from(`${JSON.stringify(await controllerRequest())}\n`, 'utf8')
+      const stressedResult = await runExactControllerBytes(requestBytes, stressedController)
+      expect(stressedResult, JSON.stringify(stressedResult)).toMatchObject({ code: 0, stderr: '' })
+      expect(JSON.parse(stressedResult.stdout)).toMatchObject({ status: 'PASS', cleanupConfirmed: true })
+    }
+    expect(controller).toContain('$api::AssignProcessToJobObject($outerJob, $api::GetCurrentProcess())')
+    expect(controller).not.toContain('[Diagnostics.Process]::GetCurrentProcess().Handle')
   })
 
   it('binds the literal first host and makes unconfirmed parent cleanup fail closed', async () => {
