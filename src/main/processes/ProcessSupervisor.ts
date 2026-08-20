@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 
 export type ManagedProcessKind = 'claude' | 'mcp' | 'terminal';
+export type ManagedProcessSettlement = 'error-or-close' | 'close-only';
 
 export interface ManagedProcessRequest {
   id?: string;
@@ -12,6 +13,8 @@ export interface ManagedProcessRequest {
   sessionId?: string;
   taskId?: string;
   runId?: string;
+  settlement?: ManagedProcessSettlement;
+  closeTimeoutMs?: number;
 }
 
 export interface ProcessStartRecord {
@@ -53,6 +56,21 @@ export interface ProcessTerminationOptions {
   forceMs?: number;
 }
 
+export interface ManagedProcessCleanupCapability {
+  retryCleanup(options?: ProcessTerminationOptions): Promise<void>;
+}
+
+export class ManagedProcessCleanupUnconfirmedError extends Error {
+  readonly code = 'MANAGED_PROCESS_CLEANUP_UNCONFIRMED';
+  readonly cleanup: ManagedProcessCleanupCapability;
+
+  constructor(cleanup: ManagedProcessCleanupCapability) {
+    super('Managed process cleanup could not be confirmed.');
+    this.name = 'ManagedProcessCleanupUnconfirmedError';
+    this.cleanup = cleanup;
+  }
+}
+
 export interface ManagedProcessHandle {
   readonly id: string;
   readonly pid: number;
@@ -86,6 +104,13 @@ interface ActiveProcess {
   rejectExit: (error: unknown) => void;
   terminal: ProcessExitRecord | null;
   startJournal: Promise<void>;
+  pendingError: unknown | undefined;
+  settlement: ManagedProcessSettlement;
+}
+
+interface RawCloseConfirmation {
+  isClosed(): boolean;
+  wait(timeoutMs: number): Promise<boolean>;
 }
 
 const NULL_JOURNAL: ProcessJournalStore = {
@@ -108,6 +133,40 @@ function wait(ms: number): Promise<'timeout'> {
     const timer = setTimeout(() => resolve('timeout'), ms);
     timer.unref?.();
   });
+}
+
+function observeRawClose(child: ChildProcess, observeError: boolean): RawCloseConfirmation {
+  let closed = false;
+  const waiters = new Set<(confirmed: boolean) => void>();
+  const onError = (): void => undefined;
+  const onClose = (): void => {
+    closed = true;
+    child.removeListener('close', onClose);
+    if (observeError) child.removeListener('error', onError);
+    for (const finish of waiters) finish(true);
+    waiters.clear();
+  };
+  child.once('close', onClose);
+  if (observeError) child.once('error', onError);
+
+  return {
+    isClosed: () => closed,
+    wait: (timeoutMs) => {
+      if (closed) return Promise.resolve(true);
+      return new Promise((resolve) => {
+        let timer: ReturnType<typeof setTimeout>;
+        const finish = (confirmed: boolean): void => {
+          waiters.delete(finish);
+          clearTimeout(timer);
+          resolve(confirmed);
+        };
+        waiters.add(finish);
+        timer = setTimeout(() => finish(false), timeoutMs);
+        timer.unref?.();
+        if (closed) finish(true);
+      });
+    },
+  };
 }
 
 /**
@@ -151,15 +210,25 @@ export class ProcessSupervisor {
       throw new Error('Managed process command is invalid.');
     }
 
+    const settlement = request.settlement ?? 'error-or-close';
+    const closeTimeoutMs = boundedDelay(request.closeTimeoutMs, 5_000);
     const child = this.spawnProcess(request.command, [...(request.args ?? [])], {
       ...request.options,
       shell: false,
     });
+    const rawClose = settlement === 'close-only'
+      ? observeRawClose(child, !child.pid)
+      : undefined;
     if (!child.pid) {
       // Node reports asynchronous spawn failures through `error`; keep that
       // event observed even though the missing PID already fails this launch.
-      child.once('error', () => undefined);
+      if (!rawClose) child.once('error', () => undefined);
       child.kill('SIGKILL');
+      if (rawClose && !await rawClose.wait(closeTimeoutMs)) {
+        throw new ManagedProcessCleanupUnconfirmedError(
+          this.cleanupCapability(child, rawClose, closeTimeoutMs),
+        );
+      }
       throw new Error('Managed process did not provide a PID.');
     }
 
@@ -189,21 +258,40 @@ export class ProcessSupervisor {
       rejectExit,
       terminal: null,
       startJournal: Promise.resolve(),
+      pendingError: undefined,
+      settlement,
     };
     active.startJournal = Promise.resolve(this.journal.recordStarted({ ...start }));
     this.active.set(id, active);
 
     const finalize = (exitCode: number | null, signal: string | null, error?: unknown): void => {
+      child.removeListener('close', onClose);
+      child.removeListener('error', onError);
       void this.finalize(active, exitCode, signal, error);
     };
-    child.once('close', (code, signal) => finalize(code, signal));
-    child.once('error', (error) => finalize(null, null, error));
+    const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
+      finalize(code, signal, active.pendingError);
+    };
+    const onError = (error: Error): void => {
+      if (active.settlement === 'close-only') {
+        active.pendingError ??= error;
+        return;
+      }
+      finalize(null, null, error);
+    };
+    child.once('close', onClose);
+    child.once('error', onError);
 
     try {
       await active.startJournal;
     } catch (error) {
       this.active.delete(id);
       child.kill('SIGKILL');
+      if (rawClose && !await rawClose.wait(closeTimeoutMs)) {
+        throw new ManagedProcessCleanupUnconfirmedError(
+          this.cleanupCapability(child, rawClose, closeTimeoutMs),
+        );
+      }
       throw new Error(`Managed process journal rejected launch: ${errorMessage(error)}`);
     }
 
@@ -302,6 +390,32 @@ export class ProcessSupervisor {
       waitForExit: () => active.exit,
       terminate: (options: ProcessTerminationOptions = {}) => this.terminateActive(active, options),
     });
+  }
+
+  private cleanupCapability(
+    child: ChildProcess,
+    rawClose: RawCloseConfirmation,
+    closeTimeoutMs: number,
+  ): ManagedProcessCleanupCapability {
+    let inFlight: Promise<void> | null = null;
+    const retryCleanup = (options: ProcessTerminationOptions = {}): Promise<void> => {
+      if (rawClose.isClosed()) return Promise.resolve();
+      if (inFlight) return inFlight;
+      const attempt = (async () => {
+        child.kill('SIGKILL');
+        const timeoutMs = boundedDelay(options.forceMs, closeTimeoutMs);
+        if (!await rawClose.wait(timeoutMs)) {
+          throw new Error('Managed process cleanup could not be confirmed.');
+        }
+      })();
+      inFlight = attempt;
+      void attempt.then(
+        () => { if (inFlight === attempt) inFlight = null; },
+        () => { if (inFlight === attempt) inFlight = null; },
+      );
+      return attempt;
+    };
+    return Object.freeze({ retryCleanup });
   }
 
   private async finalize(
