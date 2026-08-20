@@ -60,6 +60,23 @@ export interface ManagedProcessCleanupCapability {
   retryCleanup(options?: ProcessTerminationOptions): Promise<void>;
 }
 
+export type ManagedProcessLaunchFailureReason =
+  | 'permission_denied'
+  | 'launch_failed';
+
+export class ManagedProcessLaunchError extends Error {
+  readonly reason: ManagedProcessLaunchFailureReason;
+
+  constructor(reason: ManagedProcessLaunchFailureReason) {
+    super('Managed process launch failed.');
+    Object.defineProperty(this, 'name', {
+      value: 'ManagedProcessLaunchError',
+      configurable: true,
+    });
+    this.reason = reason;
+  }
+}
+
 export class ManagedProcessCleanupUnconfirmedError extends Error {
   readonly code = 'MANAGED_PROCESS_CLEANUP_UNCONFIRMED';
   readonly cleanup: ManagedProcessCleanupCapability;
@@ -111,6 +128,7 @@ interface ActiveProcess {
 interface RawCloseConfirmation {
   isClosed(): boolean;
   wait(timeoutMs: number): Promise<boolean>;
+  launchFailureReason(): ManagedProcessLaunchFailureReason;
 }
 
 const NULL_JOURNAL: ProcessJournalStore = {
@@ -137,8 +155,19 @@ function wait(ms: number): Promise<'timeout'> {
 
 function observeRawClose(child: ChildProcess, observeError: boolean): RawCloseConfirmation {
   let closed = false;
+  let launchFailureReason: ManagedProcessLaunchFailureReason = 'launch_failed';
   const waiters = new Set<(confirmed: boolean) => void>();
-  const onError = (): void => undefined;
+  const onError = (error: unknown): void => {
+    if (
+      typeof error === 'object'
+      && error !== null
+      && 'code' in error
+      && ((error as { code?: unknown }).code === 'EACCES'
+        || (error as { code?: unknown }).code === 'EPERM')
+    ) {
+      launchFailureReason = 'permission_denied';
+    }
+  };
   const onClose = (): void => {
     closed = true;
     child.removeListener('close', onClose);
@@ -151,6 +180,7 @@ function observeRawClose(child: ChildProcess, observeError: boolean): RawCloseCo
 
   return {
     isClosed: () => closed,
+    launchFailureReason: () => launchFailureReason,
     wait: (timeoutMs) => {
       if (closed) return Promise.resolve(true);
       return new Promise((resolve) => {
@@ -228,6 +258,9 @@ export class ProcessSupervisor {
         throw new ManagedProcessCleanupUnconfirmedError(
           this.cleanupCapability(child, rawClose, closeTimeoutMs),
         );
+      }
+      if (rawClose) {
+        throw new ManagedProcessLaunchError(rawClose.launchFailureReason());
       }
       throw new Error('Managed process did not provide a PID.');
     }

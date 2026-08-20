@@ -7,6 +7,7 @@ import {
   type ManagedProcessHandle,
   type ManagedProcessRequest,
   type ProcessExitRecord,
+  type ProcessStartRecord,
   type ProcessSupervisor,
 } from "../../processes/ProcessSupervisor";
 import {
@@ -86,6 +87,8 @@ interface ManagerHarnessOptions {
   deferredUpdate?: boolean;
   disposeFailure?: unknown;
   log?: ClaudeCodeUpdateManagerOptions["log"];
+  onResolve?(): void;
+  onProbeVersion?(): void;
 }
 
 function managerHarness(options: ManagerHarnessOptions = {}) {
@@ -98,10 +101,12 @@ function managerHarness(options: ManagerHarnessOptions = {}) {
   let versionIndex = 0;
   let activeTasks = options.activeTasks ?? false;
   let disposeFailure = options.disposeFailure;
+  const isFakeRuntime = vi.fn(() => options.fakeRuntime ?? false);
 
   const resolver = {
     resolve: vi.fn(() => {
       operations.push("resolve");
+      options.onResolve?.();
       const result =
         resolutions[Math.min(resolutionIndex, resolutions.length - 1)];
       resolutionIndex += 1;
@@ -111,6 +116,7 @@ function managerHarness(options: ManagerHarnessOptions = {}) {
   const runner: ClaudeUpdateCommandRunnerPort = {
     probeVersion: vi.fn(async () => {
       operations.push("version");
+      options.onProbeVersion?.();
       if (options.versionFailure !== undefined) throw options.versionFailure;
       const value = versions[Math.min(versionIndex, versions.length - 1)];
       versionIndex += 1;
@@ -131,7 +137,7 @@ function managerHarness(options: ManagerHarnessOptions = {}) {
     runtimeGate,
     runner,
     hasActiveTasks: () => activeTasks,
-    isFakeRuntime: () => options.fakeRuntime ?? false,
+    isFakeRuntime,
     log: options.log,
   });
 
@@ -140,6 +146,7 @@ function managerHarness(options: ManagerHarnessOptions = {}) {
     operations,
     resolver,
     runner,
+    isFakeRuntime,
     runtimeGate,
     releaseUpdate: () => updateDeferred.resolve(),
     setActiveTasks: (value: boolean) => {
@@ -169,21 +176,24 @@ describe("ClaudeCodeUpdateManager", () => {
     expect(Object.isFrozen(test.manager.getSnapshot())).toBe(true);
     expect(test.manager.isUpdating()).toBe(false);
     expect(test.operations).toEqual([]);
+    expect(test.isFakeRuntime).not.toHaveBeenCalled();
   });
 
   it("returns unavailable for a fake runtime before touching the gate or resolver", async () => {
     const test = managerHarness({ fakeRuntime: true });
     const ordinary = test.runtimeGate.tryAcquireOrdinary();
 
-    expect(test.manager.getSnapshot()).toEqual({
-      status: "unavailable",
-      reason: "unsupported_installation",
-      beforeVersion: null,
-      afterVersion: null,
-    });
+    expect(test.manager.getSnapshot()).toEqual(IDLE);
+    expect(test.isFakeRuntime).not.toHaveBeenCalled();
     await expect(test.manager.updateNow()).resolves.toEqual(
-      test.manager.getSnapshot(),
+      Object.freeze({
+        status: "unavailable",
+        reason: "unsupported_installation",
+        beforeVersion: null,
+        afterVersion: null,
+      }),
     );
+    expect(test.isFakeRuntime).toHaveBeenCalledOnce();
     expect(test.operations).toEqual([]);
     expect(test.runtimeGate.snapshot()).toEqual({
       ordinaryLeaseCount: 1,
@@ -287,6 +297,51 @@ describe("ClaudeCodeUpdateManager", () => {
     ]);
   });
 
+  it.each(["log", "resolver", "probe"] as const)(
+    "publishes the exact in-flight promise before synchronous %s re-entry",
+    async (source) => {
+      let test!: ReturnType<typeof managerHarness>;
+      let reentered: Promise<ClaudeCodeUpdateSnapshot> | null = null;
+      let didReenter = false;
+      const reenter = (): void => {
+        if (didReenter) return;
+        didReenter = true;
+        reentered = test.manager.updateNow();
+      };
+      test = managerHarness({
+        deferredUpdate: true,
+        ...(source === "log"
+          ? {
+              log: (stage: string) => {
+                if (stage === "resolve") reenter();
+              },
+            }
+          : {}),
+        ...(source === "resolver" ? { onResolve: reenter } : {}),
+        ...(source === "probe" ? { onProbeVersion: reenter } : {}),
+      });
+
+      const first = test.manager.updateNow();
+      const snapshotDuringReentry = test.manager.getSnapshot();
+      await waitForOperation(test.operations, "update");
+      test.releaseUpdate();
+      const [firstResult, reenteredResult] = await Promise.all([
+        first,
+        reentered,
+      ]);
+
+      expect(reentered).toBe(first);
+      expect(snapshotDuringReentry).toMatchObject({
+        status: "updating",
+        reason: null,
+      });
+      expect(reenteredResult).toEqual(firstResult);
+      expect(test.operations.filter((entry) => entry === "update")).toHaveLength(
+        1,
+      );
+    },
+  );
+
   it("returns up_to_date for one unchanged bounded Claude Code version", async () => {
     const test = managerHarness({
       versions: ["2.1.218 (Claude Code)", "2.1.218 (Claude Code)"],
@@ -312,6 +367,19 @@ describe("ClaudeCodeUpdateManager", () => {
     });
   });
 
+  it("accepts an alphanumeric prerelease identifier beginning with a digit", async () => {
+    const test = managerHarness({
+      versions: ["2.1.219-1alpha", "2.1.219-1alpha (Claude Code)"],
+    });
+
+    await expect(test.manager.updateNow()).resolves.toEqual({
+      status: "up_to_date",
+      reason: null,
+      beforeVersion: "2.1.219-1alpha",
+      afterVersion: "2.1.219-1alpha",
+    });
+  });
+
   it.each([
     ["lower stable version", ["2.1.219", "2.1.218"]],
     ["lower prerelease version", ["2.1.219-beta.2", "2.1.219-beta.1"]],
@@ -334,6 +402,7 @@ describe("ClaudeCodeUpdateManager", () => {
     ["missing patch", "2.1"],
     ["metadata", "2.1.218+private"],
     ["raw multiline", "2.1.218\nprivate-output-sentinel"],
+    ["numeric prerelease with a leading zero", "2.1.218-01"],
     ["oversized", `2.1.218${"x".repeat(262_145)}`],
   ])(
     "rejects %s pre-version output before mutation",
@@ -559,6 +628,8 @@ interface SyntheticHandleControl {
   readonly child: SyntheticChild;
   readonly terminate: ReturnType<typeof vi.fn>;
   close(exitCode?: number | null, error?: string): void;
+  rejectWait(error: unknown, closeConfirmed: boolean): void;
+  isClosed(): boolean;
 }
 
 function processExit(
@@ -602,6 +673,14 @@ function syntheticHandle(
     child.emit("close", exitCode, null);
     exited.resolve(result);
   };
+  const rejectWait = (error: unknown, closeConfirmed: boolean): void => {
+    if (closed) return;
+    if (closeConfirmed) {
+      closed = true;
+      child.emit("close", null, null);
+    }
+    exited.reject(error);
+  };
   const terminate = vi.fn(async () => {
     const failure = options.terminationFailures?.[terminationIndex];
     terminationIndex += 1;
@@ -617,7 +696,14 @@ function syntheticHandle(
     waitForExit: () => exited.promise,
     terminate,
   });
-  return { handle, child, terminate, close };
+  return {
+    handle,
+    child,
+    terminate,
+    close,
+    rejectWait,
+    isClosed: () => closed,
+  };
 }
 
 function runnerHarness(
@@ -626,6 +712,7 @@ function runnerHarness(
     spawn?: (
       request: ManagedProcessRequest,
     ) => ManagedProcessHandle | Promise<ManagedProcessHandle>;
+    activeProcesses?: () => readonly ProcessStartRecord[];
   } = {},
 ) {
   const requests: ManagedProcessRequest[] = [];
@@ -641,7 +728,19 @@ function runnerHarness(
       controls.push(control);
       return control.handle;
     }),
-  } as unknown as Pick<ProcessSupervisor, "spawn">;
+    getActiveProcesses: vi.fn(() =>
+      options.activeProcesses
+        ? [...options.activeProcesses()]
+        : controls
+            .filter((control) => !control.isClosed())
+            .map((control) => ({
+              id: control.handle.id,
+              pid: control.handle.pid,
+              kind: "claude" as const,
+              startedAt: control.handle.startedAt,
+            })),
+    ),
+  } as unknown as Pick<ProcessSupervisor, "spawn" | "getActiveProcesses">;
   const runner = new SupervisedClaudeUpdateCommandRunner(
     supervisor,
     options.environment ?? {},
@@ -869,6 +968,154 @@ describe("SupervisedClaudeUpdateCommandRunner", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("performs a final cleanup sweep for a normal handle returned after the first disposal sweep", async () => {
+    const spawnAttempt = deferred<ManagedProcessHandle>();
+    const unconfirmed = fixedRunnerFailure("cleanup_unconfirmed");
+    const lateHandle = syntheticHandle({
+      id: "late-normal-handle",
+      terminationFailures: [unconfirmed],
+    });
+    const test = runnerHarness({ spawn: () => spawnAttempt.promise });
+    const gate = new ClaudeRuntimeMutationGate();
+    const manager = new ClaudeCodeUpdateManager({
+      resolver: { resolve: () => resolved() },
+      runtimeGate: gate,
+      runner: test.runner,
+      hasActiveTasks: () => false,
+      isFakeRuntime: () => false,
+    });
+
+    const updating = manager.updateNow();
+    await waitForRequest(test.requests);
+    const disposing = manager.dispose();
+    expect(gate.snapshot().updateActive).toBe(true);
+
+    spawnAttempt.resolve(lateHandle.handle);
+    await expect(updating).resolves.toMatchObject({
+      status: "error",
+      reason: "cleanup_unconfirmed",
+    });
+    await expect(disposing).resolves.toBeUndefined();
+
+    expect(lateHandle.terminate).toHaveBeenCalledTimes(2);
+    expect(gate.snapshot().updateActive).toBe(false);
+  });
+
+  it("performs a final cleanup sweep for a typed spawn failure retained after the first disposal sweep", async () => {
+    const spawnAttempt = deferred<ManagedProcessHandle>();
+    const cleanupConfirmation = deferred<void>();
+    const retryCleanup = vi.fn(() => cleanupConfirmation.promise);
+    const typedError = new ManagedProcessCleanupUnconfirmedError(
+      Object.freeze({ retryCleanup }),
+    );
+    const test = runnerHarness({ spawn: () => spawnAttempt.promise });
+    const gate = new ClaudeRuntimeMutationGate();
+    const manager = new ClaudeCodeUpdateManager({
+      resolver: { resolve: () => resolved() },
+      runtimeGate: gate,
+      runner: test.runner,
+      hasActiveTasks: () => false,
+      isFakeRuntime: () => false,
+    });
+
+    const updating = manager.updateNow();
+    await waitForRequest(test.requests);
+    let disposeSettled = false;
+    const disposing = manager.dispose().finally(() => {
+      disposeSettled = true;
+    });
+    spawnAttempt.reject(typedError);
+    for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+    const retryCountBeforeConfirmation = retryCleanup.mock.calls.length;
+    const gateBeforeConfirmation = gate.snapshot().updateActive;
+    const settledBeforeConfirmation = disposeSettled;
+
+    cleanupConfirmation.resolve();
+    await expect(updating).resolves.toMatchObject({
+      status: "error",
+      reason: "cleanup_unconfirmed",
+    });
+    await expect(disposing).resolves.toBeUndefined();
+
+    expect(retryCountBeforeConfirmation).toBe(1);
+    expect(gateBeforeConfirmation).toBe(true);
+    expect(settledBeforeConfirmation).toBe(false);
+    expect(gate.snapshot().updateActive).toBe(false);
+  });
+
+  it("maps an exit-journal rejection after confirmed close to update_failed without latching the gate", async () => {
+    const control = syntheticHandle({ id: "closed-journal-failure" });
+    let active: readonly ProcessStartRecord[] = [
+      {
+        id: control.handle.id,
+        pid: control.handle.pid,
+        kind: "claude",
+        startedAt: control.handle.startedAt,
+      },
+    ];
+    const test = runnerHarness({
+      spawn: () => control.handle,
+      activeProcesses: () => active,
+    });
+    const gate = new ClaudeRuntimeMutationGate();
+    const manager = new ClaudeCodeUpdateManager({
+      resolver: { resolve: () => resolved() },
+      runtimeGate: gate,
+      runner: test.runner,
+      hasActiveTasks: () => false,
+      isFakeRuntime: () => false,
+    });
+
+    const updating = manager.updateNow();
+    await waitForRequest(test.requests);
+    control.child.stdout.emit("data", Buffer.from("2.1.218"));
+    active = [];
+    control.rejectWait(new Error("private-exit-journal-sentinel"), true);
+
+    await expect(updating).resolves.toEqual({
+      status: "error",
+      reason: "update_failed",
+      beforeVersion: null,
+      afterVersion: null,
+    });
+    expect(control.terminate).not.toHaveBeenCalled();
+    expect(gate.snapshot().updateActive).toBe(false);
+  });
+
+  it("retains a handle when wait rejection occurs while the supervisor still owns it", async () => {
+    const control = syntheticHandle({ id: "still-active-wait-failure" });
+    const active: readonly ProcessStartRecord[] = [
+      {
+        id: control.handle.id,
+        pid: control.handle.pid,
+        kind: "claude",
+        startedAt: control.handle.startedAt,
+      },
+    ];
+    const test = runnerHarness({
+      spawn: () => control.handle,
+      activeProcesses: () => active,
+    });
+    const gate = new ClaudeRuntimeMutationGate();
+    const manager = new ClaudeCodeUpdateManager({
+      resolver: { resolve: () => resolved() },
+      runtimeGate: gate,
+      runner: test.runner,
+      hasActiveTasks: () => false,
+      isFakeRuntime: () => false,
+    });
+
+    const updating = manager.updateNow();
+    await waitForRequest(test.requests);
+    control.rejectWait(new Error("private-active-wait-sentinel"), false);
+
+    await expect(updating).resolves.toMatchObject({
+      status: "error",
+      reason: "cleanup_unconfirmed",
+    });
+    expect(gate.snapshot().updateActive).toBe(true);
   });
 
   it("retains a typed pre-handle cleanup capability and releases the manager gate only after dispose confirms it", async () => {

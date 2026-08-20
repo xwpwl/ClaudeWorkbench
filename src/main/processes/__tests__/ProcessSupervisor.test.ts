@@ -3,6 +3,7 @@ import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { describe, expect, it, vi } from 'vitest';
 import {
   ManagedProcessCleanupUnconfirmedError,
+  ManagedProcessLaunchError,
   ProcessSupervisor,
   type ProcessExitRecord,
   type ProcessStartRecord,
@@ -159,7 +160,11 @@ describe('ProcessSupervisor', () => {
       expect(test.children[0].listenerCount('close')).toBe(1);
       test.children[0].emit('close', null, 'SIGKILL');
 
-      await expect(spawning).rejects.toThrow(/did not provide a PID/i);
+      await expect(spawning).rejects.toBeInstanceOf(ManagedProcessLaunchError);
+      await expect(spawning).rejects.toMatchObject({
+        name: 'ManagedProcessLaunchError',
+        reason: 'launch_failed',
+      });
       expect(test.children[0].listenerCount('close')).toBe(0);
       expect(test.children[0].listenerCount('error')).toBe(0);
       expect(vi.getTimerCount()).toBe(0);
@@ -167,6 +172,68 @@ describe('ProcessSupervisor', () => {
       vi.useRealTimers();
     }
   });
+
+  it.each(['EACCES', 'EPERM'] as const)(
+    'returns one fixed safe %s launch reason only after missing-PID close is confirmed',
+    async (code) => {
+      vi.useFakeTimers();
+      try {
+        const test = harness({ pid: 0 });
+        const spawning = test.supervisor.spawn({
+          kind: 'claude',
+          command: 'C:\\private-path\\claude.exe',
+          args: ['private-argv'],
+          options: { env: { PRIVATE_TOKEN: 'private-secret' } },
+          settlement: 'close-only',
+          closeTimeoutMs: 50,
+        });
+        const captured = spawning.catch((error: unknown) => error);
+        await Promise.resolve();
+
+        test.children[0].emit(
+          'error',
+          Object.assign(new Error(`spawn C:\\private-path ${code}`), { code }),
+        );
+        let settled = false;
+        void captured.then(() => {
+          settled = true;
+        });
+        await Promise.resolve();
+        expect(settled).toBe(false);
+
+        test.children[0].emit('close', null, null);
+        const error = (await captured) as Error & { reason?: unknown };
+
+        expect(error).toBeInstanceOf(ManagedProcessLaunchError);
+        expect(error).toMatchObject({
+          name: 'ManagedProcessLaunchError',
+          reason: 'permission_denied',
+        });
+        expect(String(error)).toBe(
+          'ManagedProcessLaunchError: Managed process launch failed.',
+        );
+        expect(JSON.stringify(error)).toBe('{"reason":"permission_denied"}');
+        for (const forbidden of [
+          'code',
+          'child',
+          'pid',
+          'command',
+          'args',
+          'argv',
+          'env',
+          'path',
+          'cause',
+        ]) {
+          expect(error).not.toHaveProperty(forbidden);
+        }
+        expect(test.children[0].listenerCount('close')).toBe(0);
+        expect(test.children[0].listenerCount('error')).toBe(0);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('observes repeated missing-PID errors until raw close', async () => {
     vi.useFakeTimers();
@@ -183,7 +250,11 @@ describe('ProcessSupervisor', () => {
       expect(() => test.children[0].emit('error', new Error('second-missing-pid-error'))).not.toThrow();
       test.children[0].emit('close', null, 'SIGKILL');
 
-      await expect(spawning).rejects.toThrow(/did not provide a PID/i);
+      await expect(spawning).rejects.toBeInstanceOf(ManagedProcessLaunchError);
+      await expect(spawning).rejects.toMatchObject({
+        name: 'ManagedProcessLaunchError',
+        reason: 'launch_failed',
+      });
       expect(test.children[0].listenerCount('error')).toBe(0);
       expect(test.children[0].listenerCount('close')).toBe(0);
       expect(vi.getTimerCount()).toBe(0);

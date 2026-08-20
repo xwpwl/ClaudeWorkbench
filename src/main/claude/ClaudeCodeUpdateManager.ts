@@ -132,7 +132,7 @@ function parseVersion(output: string): ParsedVersion | null {
   if (Buffer.byteLength(output, "utf8") > MAX_VERSION_OUTPUT_BYTES) return null;
   const trimmed = output.trim();
   const match =
-    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*))*))?(?: \(Claude Code\))?$/u.exec(
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|(?=[0-9A-Za-z-]*[A-Za-z-])[0-9A-Za-z-]+)(?:\.(?:0|[1-9]\d*|(?=[0-9A-Za-z-]*[A-Za-z-])[0-9A-Za-z-]+))*))?(?: \(Claude Code\))?$/u.exec(
       trimmed,
     );
   if (!match) return null;
@@ -200,7 +200,10 @@ export class SupervisedClaudeUpdateCommandRunner implements ClaudeUpdateCommandR
   private disposed = false;
 
   constructor(
-    private readonly supervisor: Pick<ProcessSupervisor, "spawn">,
+    private readonly supervisor: Pick<
+      ProcessSupervisor,
+      "spawn" | "getActiveProcesses"
+    >,
     private readonly environment: Readonly<NodeJS.ProcessEnv> = process.env,
   ) {}
 
@@ -374,7 +377,11 @@ export class SupervisedClaudeUpdateCommandRunner implements ClaudeUpdateCommandR
         throw new ClaudeUpdateRunnerFailure(boundaryReason);
       }
       if (result.kind === "wait_error") {
-        throw new ClaudeUpdateRunnerFailure("update_failed");
+        throw new ClaudeUpdateRunnerFailure(
+          this.isHandleActive(handle)
+            ? "cleanup_unconfirmed"
+            : "update_failed",
+        );
       }
       if (permissionDenied) {
         throw new ClaudeUpdateRunnerFailure("permission_denied");
@@ -404,9 +411,24 @@ export class SupervisedClaudeUpdateCommandRunner implements ClaudeUpdateCommandR
     this.pendingCleanups.add(pending);
     void handle.waitForExit().then(
       () => this.pendingCleanups.delete(pending),
-      () => this.pendingCleanups.delete(pending),
+      () => {
+        if (!this.isHandleActive(handle)) this.pendingCleanups.delete(pending);
+      },
     );
     return pending;
+  }
+
+  private isHandleActive(handle: ManagedProcessHandle): boolean {
+    try {
+      return this.supervisor
+        .getActiveProcesses()
+        .some(
+          (process) =>
+            process.id === handle.id && process.pid === handle.pid,
+        );
+    } catch {
+      return true;
+    }
   }
 }
 
@@ -417,9 +439,7 @@ export class ClaudeCodeUpdateManager {
   private disposeInFlight: Promise<void> | null = null;
 
   constructor(private readonly options: ClaudeCodeUpdateManagerOptions) {
-    this.snapshot = this.fakeRuntimeSelected()
-      ? FAKE_RUNTIME_SNAPSHOT
-      : IDLE_SNAPSHOT;
+    this.snapshot = IDLE_SNAPSHOT;
   }
 
   getSnapshot(): ClaudeCodeUpdateSnapshot {
@@ -448,17 +468,22 @@ export class ClaudeCodeUpdateManager {
     }
 
     this.snapshot = frozenSnapshot("updating", null, null, null);
+    let resolvePublished!: (snapshot: ClaudeCodeUpdateSnapshot) => void;
+    const published = new Promise<ClaudeCodeUpdateSnapshot>((resolve) => {
+      resolvePublished = resolve;
+    });
+    this.inFlight = published;
+    void published.then(() => {
+      if (this.inFlight === published) this.inFlight = null;
+    });
     const transaction = this.runTransaction(lease);
-    this.inFlight = transaction;
     void transaction.then(
+      resolvePublished,
       () => {
-        if (this.inFlight === transaction) this.inFlight = null;
-      },
-      () => {
-        if (this.inFlight === transaction) this.inFlight = null;
+        resolvePublished(this.finish("error", "update_failed", null, null));
       },
     );
-    return transaction;
+    return published;
   }
 
   isUpdating(): boolean {
@@ -555,13 +580,23 @@ export class ClaudeCodeUpdateManager {
   }
 
   private async performDispose(): Promise<void> {
+    const transaction = this.inFlight;
+    let initialCleanupFailed = false;
     try {
       await this.options.runner.dispose();
     } catch {
+      initialCleanupFailed = true;
+    }
+    if (transaction) {
+      await transaction;
+      try {
+        await this.options.runner.dispose();
+      } catch {
+        throw new ClaudeUpdateRunnerFailure("cleanup_unconfirmed");
+      }
+    } else if (initialCleanupFailed) {
       throw new ClaudeUpdateRunnerFailure("cleanup_unconfirmed");
     }
-    const transaction = this.inFlight;
-    if (transaction) await transaction;
     if (this.retainedLease) {
       this.retainedLease.release();
       this.retainedLease = null;
