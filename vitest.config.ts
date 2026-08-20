@@ -5,6 +5,8 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
+    maxWorkers: 2,
+    minWorkers: 1,
     include: ['src/**/*.test.ts', 'src/**/*.test.tsx', 'tests/**/*.test.ts'],
     exclude: ['node_modules', 'dist'],
   },

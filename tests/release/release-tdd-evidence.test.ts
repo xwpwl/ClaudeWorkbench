@@ -26,6 +26,13 @@ const IPC_TEST_REFERENCES = [
   'src/preload/__tests__/index.test.ts',
   'src/preload/__tests__/transport-surface.test.ts',
 ];
+const INVALID_IPC_CHILD_ARGV = [
+  ['missing reviewed reference', ['node', 'node_modules/vitest/vitest.mjs', 'run', IPC_TEST_REFERENCES[0]]],
+  ['wrong executable', ['npm', 'node_modules/vitest/vitest.mjs', 'run', ...IPC_TEST_REFERENCES]],
+  ['reordered references', ['node', 'node_modules/vitest/vitest.mjs', 'run', ...[...IPC_TEST_REFERENCES].reverse()]],
+  ['duplicate reference', ['node', 'node_modules/vitest/vitest.mjs', 'run', ...IPC_TEST_REFERENCES, IPC_TEST_REFERENCES[0]]],
+  ['extra reporter option', ['node', 'node_modules/vitest/vitest.mjs', 'run', '--reporter', IPC_TEST_REFERENCES[0], ...IPC_TEST_REFERENCES.slice(1)]],
+] as const;
 const PROTECTED_INPUTS = [
   ['toolchain contract', 'scripts/release/tdd-evidence-toolchain.json', '75f8495157afae85bd9c98232221576cbba9157b316c00a9639edec636936472'],
   ['recorder CLI', 'scripts/release/tdd-evidence.mjs', 'ea913e99264471456ddbe3577707f137e903e676928406b5c9fca6d1dbace8b6'],
@@ -994,13 +1001,6 @@ describe('release TDD evidence', () => {
   it('executes the shipping CLI in an isolated real Git repository without touching this worktree ledger', async () => {
     const { root, greenPaths } = await createCliRepository();
     const exact = ['node', 'node_modules/vitest/vitest.mjs', 'run', ...IPC_TEST_REFERENCES];
-    const invalidVectors = [
-      ['node', 'node_modules/vitest/vitest.mjs', 'run', IPC_TEST_REFERENCES[0]],
-      ['npm', 'node_modules/vitest/vitest.mjs', 'run', ...IPC_TEST_REFERENCES],
-      ['node', 'node_modules/vitest/vitest.mjs', 'run', ...[...IPC_TEST_REFERENCES].reverse()],
-      ['node', 'node_modules/vitest/vitest.mjs', 'run', ...IPC_TEST_REFERENCES, IPC_TEST_REFERENCES[0]],
-      ['node', 'node_modules/vitest/vitest.mjs', 'run', '--reporter', IPC_TEST_REFERENCES[0], ...IPC_TEST_REFERENCES.slice(1)],
-    ];
     expect(() => assertTddChildArgv('foundation-release-ipc', 'red', exact)).not.toThrow();
     const ledger = path.join(workspace, 'release-validation', 'tdd', 'requirements-tdd-evidence.json');
     const before = await fs.stat(ledger).then(async (stat) => ({ mtimeMs: stat.mtimeMs, hash: createHash('sha256').update(await fs.readFile(ledger)).digest('hex') })).catch(() => null);
@@ -1016,13 +1016,6 @@ describe('release TDD evidence', () => {
     await execFile('git', ['add', '-N', '--', ...greenPaths], { cwd: root });
     expect((await runCli(root, 'green', exact)).code).toBe(0);
     expect(await fs.readFile(path.join(root, 'fixture-child-ran'), 'utf8')).toBe('clean\nclean\n');
-    for (const childArgv of invalidVectors) {
-      const invalidRoot = await createCliRepository();
-      const beforeInvalid = await fs.readFile(path.join(invalidRoot.root, 'release-validation', 'tdd', 'requirements-tdd-evidence.json')).catch(() => null);
-      expect((await runCli(invalidRoot.root, 'red', childArgv)).code).toBe(1);
-      expect(await fs.readFile(path.join(invalidRoot.root, 'fixture-child-ran')).catch(() => null)).toBeNull();
-      expect(await fs.readFile(path.join(invalidRoot.root, 'release-validation', 'tdd', 'requirements-tdd-evidence.json')).catch(() => null)).toEqual(beforeInvalid);
-    }
     const evidence = JSON.parse(await fs.readFile(path.join(root, 'release-validation', 'tdd', 'requirements-tdd-evidence.json'), 'utf8'));
     expect(evidence.entries.map((entry: { plannedTestReferences: string[] }) => entry.plannedTestReferences)).toEqual([IPC_TEST_REFERENCES, IPC_TEST_REFERENCES]);
     expect(await fs.stat(path.join(root, 'outside', 'evidence.json')).then(() => true).catch(() => false)).toBe(false);
@@ -1032,6 +1025,15 @@ describe('release TDD evidence', () => {
     expect(cliSource).not.toContain('WORKBENCH_TDD_EVIDENCE_ROOT');
     expect(cliSource).not.toContain('WORKBENCH_TDD_EVIDENCE_PATH');
     expect(cliSource).toContain("'release-validation', 'tdd', 'requirements-tdd-evidence.json'");
+  }, 30_000);
+
+  it.each(INVALID_IPC_CHILD_ARGV)('rejects the %s shipping CLI argv without child or ledger activity', async (_label, childArgv) => {
+    const { root } = await createCliRepository();
+    const ledger = path.join(root, 'release-validation', 'tdd', 'requirements-tdd-evidence.json');
+    const before = await fs.readFile(ledger).catch(() => null);
+    expect((await runCli(root, 'red', [...childArgv])).code).toBe(1);
+    expect(await fs.readFile(path.join(root, 'fixture-child-ran')).catch(() => null)).toBeNull();
+    expect(await fs.readFile(ledger).catch(() => null)).toEqual(before);
   }, 30_000);
 
   it.runIf(process.platform === 'win32')('uses the official plan launcher before JavaScript and never executes caller Node preloads', async () => {

@@ -833,15 +833,29 @@ describe('CheckpointManager with a real Git repository', () => {
       );
     });
 
-    it('can restore the generated rollback checkpoint to return to the pre-restore state', async () => {
-      const checkpoint = await createBaseline();
-      write('src/app.txt', 'AI state before restore\n');
-      const { result } = await restore(checkpoint);
-      const rollback = manager.getCheckpoint(result.rollbackCheckpointId) as Checkpoint;
-      await restore(rollback);
+    describe('generated rollback restoration', () => {
+      let rollback: Checkpoint;
 
-      expect(text('src/app.txt')).toBe('AI state before restore\n');
-      expect(manager.listCheckpoints(TASK_ID).filter((item) => item.type === 'manual').length).toBeGreaterThanOrEqual(2);
+      beforeEach(async () => {
+        const checkpoint = await createBaseline();
+        write('src/app.txt', 'AI state before restore\n');
+        const { result } = await restore(checkpoint);
+        rollback = manager.getCheckpoint(result.rollbackCheckpointId) as Checkpoint;
+
+        expect(text('src/app.txt')).toBe('committed app\n');
+        expect(rollback).toMatchObject({
+          id: result.rollbackCheckpointId,
+          type: 'manual',
+          metadata: { reason: 'before_restore' },
+        });
+      });
+
+      it('can restore the generated rollback checkpoint to return to the pre-restore state', async () => {
+        await restore(rollback);
+
+        expect(text('src/app.txt')).toBe('AI state before restore\n');
+        expect(manager.listCheckpoints(TASK_ID).filter((item) => item.type === 'manual').length).toBeGreaterThanOrEqual(2);
+      });
     });
 
     it('returns deterministic sorted restore and delete file arrays', async () => {

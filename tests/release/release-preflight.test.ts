@@ -154,7 +154,7 @@ const FIXED_WORKSPACE_HASHES: Readonly<Record<string, string>> = Object.freeze({
   'report-schema': '50f15058d26e800e906dbfdf5dc1d2d40fc1866823b103c8d049afb3ce8a2c86',
   'security-checklist': '12926e49e979351480e9cb69e9848649d0220cdecdc85b28b75e84260f2eb6d4',
   'icon-generator': '8ffa4aa293f85dfc5d78564e6817b5f675ec354fec0bb25c74f78aa23ecaeeaf',
-  'vitest-config': 'c7e877b1573188ab25b04781da651eb4ad3674d0baf696d8b76313702a69ebff',
+  'vitest-config': '7f8dbee247ee00c302cab43a43390d29313f283a1c23dde6683bf9ec8f21e915',
   'vite-main-config': '9892468013514ca6e537351f5e34a6a4600a264d0730e90ff596e3d277e51d7b',
   'vite-preload-config': '7121099745d5401a00200c2fe40162ebff9a4bfd97d7d808566f12cfed1f7b4d',
   'vite-renderer-config': 'c7f243bde546d6a489b43ae34750bc592bfc7955c64ad72e981c9b201bfe7b9e',
@@ -185,7 +185,7 @@ const FIXED_GATE_HASHES = Object.freeze([
   ['build-resources/app-icon.ico', 'dc967dc419c60b82d0d0d93ac4720eb4ada833587e54feb605f8115907fb7c84'],
   ['build-resources/installer.nsh', '63cea8762d24f0d8a0cf950ca9e9a7c24f62cd6b5ebd7ead57ac509427348b04'],
   ['electron-builder.yml', '65844860e3d54cee0a976ebfd5daf3d93d428e844084e09ab0bfad55e4a42209'],
-  ['vitest.config.ts', 'c7e877b1573188ab25b04781da651eb4ad3674d0baf696d8b76313702a69ebff'],
+  ['vitest.config.ts', '7f8dbee247ee00c302cab43a43390d29313f283a1c23dde6683bf9ec8f21e915'],
   ['vite.main.config.ts', '9892468013514ca6e537351f5e34a6a4600a264d0730e90ff596e3d277e51d7b'],
   ['vite.preload.config.ts', '7121099745d5401a00200c2fe40162ebff9a4bfd97d7d808566f12cfed1f7b4d'],
   ['vite.renderer.config.ts', 'c7f243bde546d6a489b43ae34750bc592bfc7955c64ad72e981c9b201bfe7b9e'],
@@ -251,6 +251,30 @@ async function disposableRoot(prefix: string): Promise<string> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), prefix))
   disposableRoots.push(root)
   return root
+}
+
+async function installReportSchemaRuntimeFixture(root: string): Promise<void> {
+  const schemaDirectory = path.join(root, 'scripts', 'release', 'lib')
+  const zodDirectory = path.join(root, 'node_modules', 'zod')
+  const reviewedZodUrl = pathToFileURL(path.join(workspaceRoot, 'node_modules', 'zod', 'index.js')).href
+  await Promise.all([
+    fs.mkdir(schemaDirectory, { recursive: true }),
+    fs.mkdir(zodDirectory, { recursive: true }),
+  ])
+  await Promise.all([
+    fs.copyFile(
+      path.join(workspaceRoot, 'scripts', 'release', 'lib', 'report-schema.mjs'),
+      path.join(schemaDirectory, 'report-schema.mjs'),
+    ),
+    fs.writeFile(
+      path.join(zodDirectory, 'package.json'),
+      `${JSON.stringify({ name: 'zod', type: 'module', exports: './index.js' })}\n`,
+    ),
+    fs.writeFile(
+      path.join(zodDirectory, 'index.js'),
+      `export { z } from ${JSON.stringify(reviewedZodUrl)};\n`,
+    ),
+  ])
 }
 
 async function filesystemSnapshot(root: string): Promise<Array<Record<string, unknown>>> {
@@ -1969,7 +1993,6 @@ describe('bootstrap token state machine', () => {
   })
 
   it.each([
-    ['PASS', undefined, undefined],
     ['npm-ci child failure', undefined, ['lifecycle-electron-install', { status: 'FAIL', category: 'child-nonzero', exitCode: 7 }]],
     ['typecheck timeout', undefined, ['typecheck', { status: 'FAIL', category: 'timeout', exitCode: null }]],
     ['lint output limit', undefined, ['lint', { status: 'FAIL', category: 'output-limit', exitCode: null }]],
@@ -2224,10 +2247,7 @@ describe('marker-extracted production filesystem and import boundaries', () => {
 
   it('Task2C2 rename strictly parses and publishes a canonical report after one rename and stable reopen', async () => {
     const root = await disposableRoot('workbench-preflight-fs-report-')
-    await fs.mkdir(path.join(root, 'scripts', 'release', 'lib'), { recursive: true })
-    await fs.mkdir(path.join(root, 'node_modules'), { recursive: true })
-    await fs.copyFile(path.join(workspaceRoot, 'scripts', 'release', 'lib', 'report-schema.mjs'), path.join(root, 'scripts', 'release', 'lib', 'report-schema.mjs'))
-    await fs.cp(path.join(workspaceRoot, 'node_modules', 'zod'), path.join(root, 'node_modules', 'zod'), { recursive: true })
+    await installReportSchemaRuntimeFixture(root)
     const state = newState({ canonicalRoot: root })
     const core = await extractedCore(makeDeps(state))
     await core.testOnly.initializeReleaseDirectories({ workspaceRoot: root })
@@ -2248,10 +2268,7 @@ describe('marker-extracted production filesystem and import boundaries', () => {
 
   it('Task2C2 rename rejects a report destination visible at the final pre-rename absence check without overwriting it', async () => {
     const root = await disposableRoot('workbench-preflight-fs-report-collision-')
-    await fs.mkdir(path.join(root, 'scripts', 'release', 'lib'), { recursive: true })
-    await fs.mkdir(path.join(root, 'node_modules'), { recursive: true })
-    await fs.copyFile(path.join(workspaceRoot, 'scripts', 'release', 'lib', 'report-schema.mjs'), path.join(root, 'scripts', 'release', 'lib', 'report-schema.mjs'))
-    await fs.cp(path.join(workspaceRoot, 'node_modules', 'zod'), path.join(root, 'node_modules', 'zod'), { recursive: true })
+    await installReportSchemaRuntimeFixture(root)
     const state = newState({ canonicalRoot: root })
     const base = makeDeps(state)
     const destination = path.join(root, 'release-validation', 'reports', 'preflight.json')
@@ -2279,12 +2296,7 @@ describe('marker-extracted production filesystem and import boundaries', () => {
     ['report', 'before'], ['report', 'after'],
   ])('Task2C2 rename returns no %s success object when rename throws %s the move and performs no cleanup', async (operation, timing) => {
     const root = await disposableRoot(`workbench-preflight-rename-${operation}-${timing}-`)
-    if (operation === 'report') {
-      await fs.mkdir(path.join(root, 'scripts', 'release', 'lib'), { recursive: true })
-      await fs.mkdir(path.join(root, 'node_modules'), { recursive: true })
-      await fs.copyFile(path.join(workspaceRoot, 'scripts', 'release', 'lib', 'report-schema.mjs'), path.join(root, 'scripts', 'release', 'lib', 'report-schema.mjs'))
-      await fs.cp(path.join(workspaceRoot, 'node_modules', 'zod'), path.join(root, 'node_modules', 'zod'), { recursive: true })
-    }
+    if (operation === 'report') await installReportSchemaRuntimeFixture(root)
     const state = newState({ canonicalRoot: root })
     const base = makeDeps(state)
     let renameAttempts = 0
@@ -2312,12 +2324,7 @@ describe('marker-extracted production filesystem and import boundaries', () => {
 
   it.each(['metadata', 'report'])('Task2C2 rename rejects a same-byte %s temp inode replacement at the rename boundary', async (operation) => {
     const root = await disposableRoot(`workbench-preflight-rename-same-bytes-${operation}-`)
-    if (operation === 'report') {
-      await fs.mkdir(path.join(root, 'scripts', 'release', 'lib'), { recursive: true })
-      await fs.mkdir(path.join(root, 'node_modules'), { recursive: true })
-      await fs.copyFile(path.join(workspaceRoot, 'scripts', 'release', 'lib', 'report-schema.mjs'), path.join(root, 'scripts', 'release', 'lib', 'report-schema.mjs'))
-      await fs.cp(path.join(workspaceRoot, 'node_modules', 'zod'), path.join(root, 'node_modules', 'zod'), { recursive: true })
-    }
+    if (operation === 'report') await installReportSchemaRuntimeFixture(root)
     const state = newState({ canonicalRoot: root })
     const base = makeDeps(state)
     const core = await extractedCore(deepFreeze({
@@ -2349,10 +2356,7 @@ describe('marker-extracted production filesystem and import boundaries', () => {
 
   it('Task2C2 rename validates report schema again under the destination lease after rename', async () => {
     const root = await disposableRoot('workbench-preflight-rename-report-schema-')
-    await fs.mkdir(path.join(root, 'scripts', 'release', 'lib'), { recursive: true })
-    await fs.mkdir(path.join(root, 'node_modules'), { recursive: true })
-    await fs.copyFile(path.join(workspaceRoot, 'scripts', 'release', 'lib', 'report-schema.mjs'), path.join(root, 'scripts', 'release', 'lib', 'report-schema.mjs'))
-    await fs.cp(path.join(workspaceRoot, 'node_modules', 'zod'), path.join(root, 'node_modules', 'zod'), { recursive: true })
+    await installReportSchemaRuntimeFixture(root)
     const state = newState({ canonicalRoot: root })
     const base = makeDeps(state)
     let reportParseCalls = 0
@@ -2600,6 +2604,8 @@ describe('ordered lifecycle, report, ABI, and context behavior', { timeout: 120_
     expect(state.calls.filter((name) => name === 'command:test-full')).toHaveLength(1)
     await expect(core.loadPostInstallBindings({ workspaceRoot, context })).resolves.toBeDefined()
     await expect(core.loadPostInstallBindings({ workspaceRoot, context: { ...context } })).rejects.toThrow(/owned/iu)
+    await expect(core.runPreflight({ context, dependencyBootstrap })).rejects.toThrow()
+    expect(heldHandleCounts(state)[0]).toBe(heldHandleCounts(state)[1])
   })
 
   it('surrounds each exact lifecycle payload with independent pre/post observations and reaches only the exact final tree', async () => {

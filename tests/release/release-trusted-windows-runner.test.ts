@@ -1925,40 +1925,43 @@ describe('trusted Windows runner production surface', () => {
     expect(controller).not.toContain('GetEffectiveRightsFromAclW')
     expect(controller.indexOf('$api::CreateProcessW')).toBeLessThan(controller.indexOf('$api::AssignProcessToJobObject($innerJob'))
     expect(controller.indexOf('$api::AssignProcessToJobObject($innerJob')).toBeLessThan(controller.indexOf('$api::ResumeThread($threadHandle)'))
-    if (process.platform === 'win32') {
-      const [unrooted, rooted, pseudo] = await Promise.all([
-        runProcessHandleLifetimeProbe('unrooted'),
-        runProcessHandleLifetimeProbe('rooted'),
-        runProcessHandleLifetimeProbe('pseudo'),
-      ])
-      expect(unrooted).toMatchObject({ mode: 'unrooted', observedProcessId: 0, errorCode: 6, assigned: false, assignmentErrorCode: 6 })
-      expect(rooted).toMatchObject({ mode: 'rooted', errorCode: 0, assigned: true, assignmentErrorCode: 0 })
-      expect(rooted.observedProcessId).toBe(rooted.expectedProcessId)
-      expect(pseudo).toMatchObject({ mode: 'pseudo', errorCode: 0, assigned: true, assignmentErrorCode: 0 })
-      expect(pseudo.observedProcessId).toBe(pseudo.expectedProcessId)
-
-      const exactController = await exactControllerSource()
-      const safeAssignment = "  if (-not $api::AssignProcessToJobObject($outerJob, $api::GetCurrentProcess())) { throw 'outer-assignment' }"
-      const unsafeAssignment = "  if (-not $api::AssignProcessToJobObject($outerJob, [Diagnostics.Process]::GetCurrentProcess().Handle)) { throw 'outer-assignment' }"
-      const assignment = exactController.includes(safeAssignment) ? safeAssignment : unsafeAssignment
-      expect(exactController).toContain(assignment)
-      const handleExpression = assignment === safeAssignment
-        ? '$api::GetCurrentProcess()'
-        : '[Diagnostics.Process]::GetCurrentProcess().Handle'
-      const stressedController = exactController.replace(assignment, [
-        `  $outerProcessHandle = ${handleExpression}`,
-        '  [GC]::Collect()',
-        '  [GC]::WaitForPendingFinalizers()',
-        '  [GC]::Collect()',
-        "  if (-not $api::AssignProcessToJobObject($outerJob, $outerProcessHandle)) { throw 'outer-assignment' }",
-      ].join('\n'))
-      const requestBytes = Buffer.from(`${JSON.stringify(await controllerRequest())}\n`, 'utf8')
-      const stressedResult = await runExactControllerBytes(requestBytes, stressedController)
-      expect(stressedResult, JSON.stringify(stressedResult)).toMatchObject({ code: 0, stderr: '' })
-      expect(JSON.parse(stressedResult.stdout)).toMatchObject({ status: 'PASS', cleanupConfirmed: true })
-    }
     expect(controller).toContain('$api::AssignProcessToJobObject($outerJob, $api::GetCurrentProcess())')
     expect(controller).not.toContain('[Diagnostics.Process]::GetCurrentProcess().Handle')
+  })
+
+  it.runIf(process.platform === 'win32')('distinguishes unrooted, rooted, and pseudo process handles at real Job assignment', async () => {
+    const [unrooted, rooted, pseudo] = await Promise.all([
+      runProcessHandleLifetimeProbe('unrooted'),
+      runProcessHandleLifetimeProbe('rooted'),
+      runProcessHandleLifetimeProbe('pseudo'),
+    ])
+    expect(unrooted).toMatchObject({ mode: 'unrooted', observedProcessId: 0, errorCode: 6, assigned: false, assignmentErrorCode: 6 })
+    expect(rooted).toMatchObject({ mode: 'rooted', errorCode: 0, assigned: true, assignmentErrorCode: 0 })
+    expect(rooted.observedProcessId).toBe(rooted.expectedProcessId)
+    expect(pseudo).toMatchObject({ mode: 'pseudo', errorCode: 0, assigned: true, assignmentErrorCode: 0 })
+    expect(pseudo.observedProcessId).toBe(pseudo.expectedProcessId)
+  })
+
+  it.runIf(process.platform === 'win32')('keeps the exact controller outer Job assignment valid across GC finalization', async () => {
+    const exactController = await exactControllerSource()
+    const safeAssignment = "  if (-not $api::AssignProcessToJobObject($outerJob, $api::GetCurrentProcess())) { throw 'outer-assignment' }"
+    const unsafeAssignment = "  if (-not $api::AssignProcessToJobObject($outerJob, [Diagnostics.Process]::GetCurrentProcess().Handle)) { throw 'outer-assignment' }"
+    const assignment = exactController.includes(safeAssignment) ? safeAssignment : unsafeAssignment
+    expect(exactController).toContain(assignment)
+    const handleExpression = assignment === safeAssignment
+      ? '$api::GetCurrentProcess()'
+      : '[Diagnostics.Process]::GetCurrentProcess().Handle'
+    const stressedController = exactController.replace(assignment, [
+      `  $outerProcessHandle = ${handleExpression}`,
+      '  [GC]::Collect()',
+      '  [GC]::WaitForPendingFinalizers()',
+      '  [GC]::Collect()',
+      "  if (-not $api::AssignProcessToJobObject($outerJob, $outerProcessHandle)) { throw 'outer-assignment' }",
+    ].join('\n'))
+    const requestBytes = Buffer.from(`${JSON.stringify(await controllerRequest())}\n`, 'utf8')
+    const stressedResult = await runExactControllerBytes(requestBytes, stressedController)
+    expect(stressedResult, JSON.stringify(stressedResult)).toMatchObject({ code: 0, stderr: '' })
+    expect(JSON.parse(stressedResult.stdout)).toMatchObject({ status: 'PASS', cleanupConfirmed: true })
   })
 
   it('binds the literal first host and makes unconfirmed parent cleanup fail closed', async () => {
