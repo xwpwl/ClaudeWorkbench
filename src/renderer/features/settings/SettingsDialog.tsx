@@ -110,7 +110,8 @@ export function SettingsDialog({
   const dialogRef = useRef<HTMLDivElement>(null);
   const aboutRequestRef = useRef(0);
   const mountedRef = useRef(false);
-  const claudeUpdateRequestRef = useRef(0);
+  const claudeUpdateStateRequestRef = useRef(0);
+  const claudeUpdateOperationRef = useRef(0);
   const claudeUpdateInFlightRef = useRef(false);
   const currentProject = useWorkspaceStore((state) => state.currentProject);
 
@@ -123,7 +124,8 @@ export function SettingsDialog({
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
-      claudeUpdateRequestRef.current += 1;
+      claudeUpdateStateRequestRef.current += 1;
+      claudeUpdateOperationRef.current += 1;
     };
   }, []);
 
@@ -178,32 +180,40 @@ export function SettingsDialog({
 
   useEffect(() => {
     if (activeCategory !== 'models') {
-      claudeUpdateRequestRef.current += 1;
+      claudeUpdateStateRequestRef.current += 1;
       return undefined;
     }
 
-    const requestId = ++claudeUpdateRequestRef.current;
+    if (claudeUpdateInFlightRef.current) {
+      claudeUpdateStateRequestRef.current += 1;
+      setClaudeUpdateLoading(false);
+      setClaudeUpdateLoadError(false);
+      return undefined;
+    }
+
+    const requestId = ++claudeUpdateStateRequestRef.current;
+    setClaudeUpdateState(null);
     setClaudeUpdateLoading(true);
     setClaudeUpdateLoadError(false);
     void window.api.getClaudeCodeUpdateState()
       .then((snapshot) => {
-        if (mountedRef.current && requestId === claudeUpdateRequestRef.current) {
+        if (mountedRef.current && requestId === claudeUpdateStateRequestRef.current) {
           setClaudeUpdateState(snapshot);
         }
       })
       .catch(() => {
-        if (mountedRef.current && requestId === claudeUpdateRequestRef.current) {
+        if (mountedRef.current && requestId === claudeUpdateStateRequestRef.current) {
           setClaudeUpdateLoadError(true);
         }
       })
       .finally(() => {
-        if (mountedRef.current && requestId === claudeUpdateRequestRef.current) {
+        if (mountedRef.current && requestId === claudeUpdateStateRequestRef.current) {
           setClaudeUpdateLoading(false);
         }
       });
 
     return () => {
-      if (requestId === claudeUpdateRequestRef.current) claudeUpdateRequestRef.current += 1;
+      if (requestId === claudeUpdateStateRequestRef.current) claudeUpdateStateRequestRef.current += 1;
     };
   }, [activeCategory]);
 
@@ -323,15 +333,17 @@ export function SettingsDialog({
   const handleClaudeCodeUpdate = useCallback(async () => {
     if (claudeUpdateInFlightRef.current) return;
     claudeUpdateInFlightRef.current = true;
-    const requestId = ++claudeUpdateRequestRef.current;
+    claudeUpdateStateRequestRef.current += 1;
+    const operationId = ++claudeUpdateOperationRef.current;
     setClaudeUpdateBusy(true);
+    setClaudeUpdateLoading(false);
     setClaudeUpdateLoadError(false);
     try {
       let snapshot: ClaudeCodeUpdateSnapshot;
       try {
         snapshot = await window.api.updateClaudeCodeNow();
       } catch {
-        if (mountedRef.current && requestId === claudeUpdateRequestRef.current) {
+        if (mountedRef.current && operationId === claudeUpdateOperationRef.current) {
           setClaudeUpdateState({
             status: 'error',
             reason: 'update_failed',
@@ -342,12 +354,12 @@ export function SettingsDialog({
         return;
       }
 
-      if (!mountedRef.current || requestId !== claudeUpdateRequestRef.current) return;
+      if (!mountedRef.current || operationId !== claudeUpdateOperationRef.current) return;
       setClaudeUpdateState(snapshot);
       if (snapshot.status === 'updated' || snapshot.status === 'up_to_date') {
         try {
           const environment = await window.api.checkEnvironment();
-          if (mountedRef.current && requestId === claudeUpdateRequestRef.current) {
+          if (mountedRef.current && operationId === claudeUpdateOperationRef.current) {
             setEnvCheck(environment);
           }
         } catch {
@@ -356,7 +368,7 @@ export function SettingsDialog({
       }
     } finally {
       claudeUpdateInFlightRef.current = false;
-      if (mountedRef.current && requestId === claudeUpdateRequestRef.current) {
+      if (mountedRef.current && operationId === claudeUpdateOperationRef.current) {
         setClaudeUpdateBusy(false);
       }
     }
@@ -852,6 +864,7 @@ function ClaudeCodeSection({
   })();
   const updateDisabled = updateLoading
     || updateBusy
+    || updateLoadError
     || !envCheck?.claude.ok
     || !updateState
     || updateState.status === 'updating'

@@ -323,4 +323,61 @@ describe('Settings manual Claude Code update', () => {
     expect((button as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getByText('当前安装不支持安全的自更新。')).not.toBeNull();
   });
+
+  it('reconciles an in-flight update across category navigation without a stale state read', async () => {
+    const update = deferred<ClaudeCodeUpdateSnapshot>();
+    const checkEnvironment = vi.fn(async () => installedEnvironment);
+    const getState = vi.fn(async () => idleSnapshot);
+    const api = installApi({
+      checkEnvironment,
+      getClaudeCodeUpdateState: getState,
+      updateClaudeCodeNow: vi.fn(() => update.promise),
+    });
+    render(<SettingsDialog initialCategory="models" onClose={vi.fn()} />);
+    const user = userEvent.setup();
+    const initialButton = await screen.findByTestId('claude-code-update-now');
+    await waitFor(() => expect((initialButton as HTMLButtonElement).disabled).toBe(false));
+
+    await user.click(initialButton);
+    await user.click(screen.getByRole('button', { name: '常规' }));
+    await user.click(screen.getByRole('button', { name: '模型与连接' }));
+
+    const returnedButton = await screen.findByTestId('claude-code-update-now');
+    expect((returnedButton as HTMLButtonElement).disabled).toBe(true);
+    expect(returnedButton.textContent).toContain('正在更新…');
+    expect(getState).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      update.resolve({ status: 'updated', reason: null, beforeVersion: '2.1.218', afterVersion: '2.1.219' });
+      await update.promise;
+    });
+
+    expect(await screen.findByText('更新完成。 2.1.218 → 2.1.219')).not.toBeNull();
+    await waitFor(() => expect(checkEnvironment).toHaveBeenCalledTimes(2));
+    expect((returnedButton as HTMLButtonElement).disabled).toBe(false);
+    expect(api.updateClaudeCodeNow).toHaveBeenCalledOnce();
+    expect(getState).toHaveBeenCalledOnce();
+  });
+
+  it('revokes an old actionable snapshot when a later Models state read fails', async () => {
+    const getState = vi.fn()
+      .mockResolvedValueOnce(idleSnapshot)
+      .mockRejectedValueOnce(new Error('C:\\private\\reentry-state-sentinel'));
+    const api = installApi({ getClaudeCodeUpdateState: getState });
+    render(<SettingsDialog initialCategory="models" onClose={vi.fn()} />);
+    const user = userEvent.setup();
+    const initialButton = await screen.findByTestId('claude-code-update-now');
+    await waitFor(() => expect((initialButton as HTMLButtonElement).disabled).toBe(false));
+
+    await user.click(screen.getByRole('button', { name: '常规' }));
+    await user.click(screen.getByRole('button', { name: '模型与连接' }));
+
+    const returnedButton = await screen.findByTestId('claude-code-update-now');
+    expect(await screen.findByText('无法读取 Claude Code 更新状态。')).not.toBeNull();
+    expect((returnedButton as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(returnedButton);
+    expect(api.updateClaudeCodeNow).not.toHaveBeenCalled();
+    expect(getState).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).not.toContain('reentry-state-sentinel');
+  });
 });
