@@ -7,6 +7,11 @@ import type {
   ClaudeEventEnvelope,
   ClaudeRunOptions,
 } from '../../../shared/types/claude';
+import type {
+  ClaudeInvocationResolution,
+  ResolvedClaudeInvocation,
+} from '../ClaudeInvocationResolver';
+import { ClaudeRuntimeMutationGate } from '../ClaudeRuntimeMutationGate';
 import {
   buildClaudeArgs,
   ClaudeCliAdapter,
@@ -53,17 +58,34 @@ function permissionBroker(): PermissionBrokerPort {
   };
 }
 
-function createHarness(options: {
+function createHarness(config: {
   permissionBroker?: PermissionBrokerPort;
   providerEnvironment?: ProviderEnvironmentPort;
+  invocation?: ResolvedClaudeInvocation;
+  resolution?: ClaudeInvocationResolution;
+  spawnError?: Error;
 } = {}) {
   const calls: SpawnCall[] = [];
   let nextPid = 4000;
+  const invocation: ResolvedClaudeInvocation = config.invocation ?? Object.freeze({
+    executable: 'node-test',
+    prefixArgs: Object.freeze(['C:\\claude\\cli.js']),
+    environmentPatch: Object.freeze({ ELECTRON_RUN_AS_NODE: 'resolver-owned' }),
+    displayPath: 'C:\\claude\\claude.cmd',
+    canonicalTargetPath: 'C:\\claude\\cli.js',
+    provenance: 'npm',
+  });
+  const resolve = vi.fn((): ClaudeInvocationResolution => config.resolution ?? ({
+    ok: true,
+    invocation,
+  }));
+  const gate = new ClaudeRuntimeMutationGate();
   const spawnProcess = ((
     command: string,
     args: string[],
     options: SpawnOptions,
   ) => {
+    if (config.spawnError) throw config.spawnError;
     const child = new FakeChildProcess(nextPid++);
     calls.push({ command, args: [...args], options, child });
     if (command === 'taskkill') {
@@ -74,17 +96,20 @@ function createHarness(options: {
 
   return {
     adapter: new ClaudeCliAdapter({
-      executable: 'claude-test',
+      invocationResolver: { resolve },
+      runtimeGate: gate,
       spawnProcess,
-      ...(options.permissionBroker
+      ...(config.permissionBroker
         ? {
-            permissionBroker: options.permissionBroker,
+            permissionBroker: config.permissionBroker,
             permissionMcpPath: path.join(process.cwd(), 'permission-mcp.js'),
           }
         : {}),
-      ...(options.providerEnvironment ? { providerEnvironment: options.providerEnvironment } : {}),
+      ...(config.providerEnvironment ? { providerEnvironment: config.providerEnvironment } : {}),
     }),
     calls,
+    gate,
+    resolve,
   };
 }
 
@@ -246,6 +271,96 @@ describe('ClaudeCliAdapter', () => {
       'mcp__permissions__request_permission',
     ]);
     expect(sanitized.join(' ')).not.toContain('mcp-secret');
+  });
+
+  it('holds an ordinary lease through task child close and prepends resolver arguments', async () => {
+    const harness = createHarness();
+
+    await harness.adapter.runPrompt(runOptions({ prompt: 'hello' }));
+
+    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(1);
+    expect(harness.calls[0].command).toBe('node-test');
+    expect(harness.calls[0].args.slice(0, 3)).toEqual([
+      'C:\\claude\\cli.js',
+      '-p',
+      'hello',
+    ]);
+
+    harness.calls[0].child.emit('close', 0, null);
+
+    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0);
+  });
+
+  it('applies the resolver environment patch after provider and task environment', async () => {
+    const providerEnvironment: ProviderEnvironmentPort = {
+      resolveChildEnvironment: vi.fn((_options, inherited) => ({
+        ...inherited,
+        ELECTRON_RUN_AS_NODE: 'provider-owned',
+        PROVIDER_ONLY: 'provider-value',
+      })),
+    };
+    const harness = createHarness({ providerEnvironment });
+
+    await harness.adapter.runPrompt(runOptions({ modelProviderId: 'provider-one' }));
+
+    expect(harness.calls[0].options.env).toMatchObject({
+      ELECTRON_RUN_AS_NODE: 'resolver-owned',
+      PROVIDER_ONLY: 'provider-value',
+    });
+  });
+
+  it('holds an ordinary lease through installation child close', async () => {
+    const harness = createHarness();
+
+    const installation = harness.adapter.checkInstallation();
+
+    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(1);
+    expect(harness.calls[0]).toMatchObject({
+      command: 'node-test',
+      args: ['C:\\claude\\cli.js', '--version'],
+    });
+    harness.calls[0].child.stdout.emit('data', Buffer.from('2.1.218 (Claude Code)\n'));
+    harness.calls[0].child.emit('close', 0, null);
+    await expect(installation).resolves.toEqual({
+      installed: true,
+      path: 'C:\\claude\\claude.cmd',
+      version: '2.1.218 (Claude Code)',
+    });
+    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0);
+  });
+
+  it('does not resolve or spawn while update ownership is active', async () => {
+    const harness = createHarness();
+    const update = harness.gate.tryAcquireUpdate();
+
+    await expect(harness.adapter.checkInstallation()).resolves.toEqual({
+      installed: false,
+      path: null,
+      version: null,
+    });
+    expect(harness.resolve).not.toHaveBeenCalled();
+    expect(harness.calls).toEqual([]);
+    update?.release();
+  });
+
+  it('releases the ordinary lease when run validation fails before spawn', async () => {
+    const harness = createHarness();
+
+    await expect(harness.adapter.runPrompt(runOptions({ prompt: '   ' })))
+      .rejects.toThrow('Prompt must not be empty');
+
+    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0);
+    expect(harness.calls).toEqual([]);
+  });
+
+  it('releases the ordinary lease when task spawning fails', async () => {
+    const harness = createHarness({ spawnError: new Error('synthetic spawn failure') });
+
+    await expect(harness.adapter.runPrompt(runOptions()))
+      .rejects.toThrow('synthetic spawn failure');
+
+    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0);
+    expect(harness.calls).toEqual([]);
   });
 
   it('spawns a run with cwd equal to the resolved project path', async () => {
