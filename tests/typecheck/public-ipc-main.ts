@@ -1,6 +1,15 @@
 import type { IpcMain } from 'electron';
-import type { ReleaseVersionInfo } from '../../src/shared/types/ipc';
+import type {
+  ClaudeCodeUpdateSnapshot,
+  ClaudeWorkbenchAPI,
+  ReleaseVersionInfo,
+} from '../../src/shared/types/ipc';
+import type { ClaudeCodeUpdateManager } from '../../src/main/claude/ClaudeCodeUpdateManager';
 import { registerClaudeIPC } from '../../src/main/ipc/claude';
+import {
+  registerClaudeUpdatesIPC,
+  type ClaudeUpdatesIPCDependencies,
+} from '../../src/main/ipc/claude-updates';
 import { registerDiagnosticsExportIPC } from '../../src/main/ipc/diagnostics';
 import { registerFileChangesIPC } from '../../src/main/ipc/file-changes';
 import { registerGitWorkspaceIPC } from '../../src/main/ipc/git-workspace';
@@ -35,6 +44,61 @@ type RegistrarIsExact<Register extends (...args: never[]) => unknown> =
 
 type RawRegistrarRejected = AssertFalse<IpcMain extends PublicIpcRegistrar ? true : false>;
 type ClaudeExact = AssertTrue<RegistrarIsExact<typeof registerClaudeIPC>>;
+type ClaudeUpdatesExact = AssertTrue<RegistrarIsExact<typeof registerClaudeUpdatesIPC>>;
+type ClaudeUpdatesDependencyKeysExact = AssertTrue<
+  IsExact<keyof ClaudeUpdatesIPCDependencies, keyof TrustedRendererIPCDependencies | 'updates'>
+>;
+type ClaudeUpdatesTrustedWebContentsExact = AssertTrue<
+  IsExact<
+    ClaudeUpdatesIPCDependencies['getTrustedWebContents'],
+    TrustedRendererIPCDependencies['getTrustedWebContents']
+  >
+>;
+type ClaudeUpdatesTrustedFrameUrlExact = AssertTrue<
+  IsExact<
+    ClaudeUpdatesIPCDependencies['getTrustedFrameUrl'],
+    TrustedRendererIPCDependencies['getTrustedFrameUrl']
+  >
+>;
+type ClaudeUpdatesManagerMethodsExact = AssertTrue<
+  IsExact<keyof ClaudeUpdatesIPCDependencies['updates'], 'getSnapshot' | 'updateNow'>
+>;
+type ClaudeUpdatesManagerExact = AssertTrue<
+  IsExact<
+    ClaudeUpdatesIPCDependencies['updates'],
+    Pick<ClaudeCodeUpdateManager, 'getSnapshot' | 'updateNow'>
+  >
+>;
+type ClaudeUpdateStateProjectionExact = AssertTrue<
+  IsExact<
+    ReturnType<ClaudeUpdatesIPCDependencies['updates']['getSnapshot']>,
+    ClaudeCodeUpdateSnapshot
+  >
+>;
+type ClaudeUpdateNowProjectionExact = AssertTrue<
+  IsExact<
+    Awaited<ReturnType<ClaudeUpdatesIPCDependencies['updates']['updateNow']>>,
+    ClaudeCodeUpdateSnapshot
+  >
+>;
+type ClaudeUpdateStateArgumentsExact = AssertTrue<
+  IsExact<Parameters<ClaudeWorkbenchAPI['getClaudeCodeUpdateState']>, []>
+>;
+type ClaudeUpdateNowArgumentsExact = AssertTrue<
+  IsExact<Parameters<ClaudeWorkbenchAPI['updateClaudeCodeNow']>, []>
+>;
+type ClaudeUpdateStateApiResultExact = AssertTrue<
+  IsExact<
+    Awaited<ReturnType<ClaudeWorkbenchAPI['getClaudeCodeUpdateState']>>,
+    ClaudeCodeUpdateSnapshot
+  >
+>;
+type ClaudeUpdateNowApiResultExact = AssertTrue<
+  IsExact<
+    Awaited<ReturnType<ClaudeWorkbenchAPI['updateClaudeCodeNow']>>,
+    ClaudeCodeUpdateSnapshot
+  >
+>;
 type DiagnosticsExact = AssertTrue<RegistrarIsExact<typeof registerDiagnosticsExportIPC>>;
 type FileChangesExact = AssertTrue<RegistrarIsExact<typeof registerFileChangesIPC>>;
 type GitWorkspaceExact = AssertTrue<RegistrarIsExact<typeof registerGitWorkspaceIPC>>;
@@ -62,6 +126,18 @@ type WorkflowsExact = AssertTrue<RegistrarIsExact<typeof registerWorkflowIPC>>;
 export type PublicIpcRegistrarTypeGate = [
   RawRegistrarRejected,
   ClaudeExact,
+  ClaudeUpdatesExact,
+  ClaudeUpdatesDependencyKeysExact,
+  ClaudeUpdatesTrustedWebContentsExact,
+  ClaudeUpdatesTrustedFrameUrlExact,
+  ClaudeUpdatesManagerMethodsExact,
+  ClaudeUpdatesManagerExact,
+  ClaudeUpdateStateProjectionExact,
+  ClaudeUpdateNowProjectionExact,
+  ClaudeUpdateStateArgumentsExact,
+  ClaudeUpdateNowArgumentsExact,
+  ClaudeUpdateStateApiResultExact,
+  ClaudeUpdateNowApiResultExact,
   DiagnosticsExact,
   FileChangesExact,
   GitWorkspaceExact,

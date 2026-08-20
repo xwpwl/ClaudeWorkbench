@@ -270,6 +270,8 @@ export const IPC_CHANNELS = {
   RELEASE_CHECK_UPDATE: 'release:check-update',
   RELEASE_DOWNLOAD_UPDATE: 'release:download-update',
   RELEASE_INSTALL_UPDATE: 'release:install-update',
+  CLAUDE_CODE_UPDATE_GET_STATE: 'claude-code-update:get-state',
+  CLAUDE_CODE_UPDATE_NOW: 'claude-code-update:update-now',
 
   // System
   SYSTEM_CHECK_ENV: 'system:check-env',
@@ -513,6 +515,8 @@ export interface ClaudeWorkbenchAPI {
   checkForUpdates(): Promise<UpdateSnapshot>;
   downloadUpdate(): Promise<UpdateSnapshot>;
   installUpdate(confirmed: boolean): Promise<boolean>;
+  getClaudeCodeUpdateState(): Promise<ClaudeCodeUpdateSnapshot>;
+  updateClaudeCodeNow(): Promise<ClaudeCodeUpdateSnapshot>;
 
   // System
   checkEnvironment(): Promise<EnvironmentCheckResult>;
@@ -685,6 +689,8 @@ export const CLAUDE_WORKBENCH_API_METHOD_KINDS = Object.freeze({
   checkForUpdates: 'promise',
   downloadUpdate: 'promise',
   installUpdate: 'promise',
+  getClaudeCodeUpdateState: 'promise',
+  updateClaudeCodeNow: 'promise',
   checkEnvironment: 'promise',
   openPath: 'promise',
   selectDirectory: 'promise',
