@@ -136,8 +136,9 @@ const WORKSPACE_ENTRY_ROWS = [
   ['legacy-safety-test', 'src/main/database/__tests__/DatabaseLegacySafety.test.ts'],
   ['diagnostics-release-test', 'src/main/diagnostics/__tests__/DiagnosticsExporter.release.test.ts'],
 ] as const
-const REVIEWED_TASK2C1_RUNNER_SHA256 = '2c2967f3e19cf1ea96e9ac4ceb074ff1572ead1617e3aeae82c9e8cdd0e74f5a'
+const REVIEWED_TASK2C1_RUNNER_SHA256 = 'c9c86598c36581f09d23e44c62c177a49d164fd513c495437fa09de954eb1fb5'
 const REVIEWED_TASK2C1_POLICY_SHA256 = 'fc50d2c63b4f3ea0049853ab6965fc96c6dc9397a35ab1b277a858b7b287eb8a'
+const PRE_HANDLE_FIX_REVIEWED_RUNNER_SHA256 = '2c2967f3e19cf1ea96e9ac4ceb074ff1572ead1617e3aeae82c9e8cdd0e74f5a'
 const PRE_TASK2C1_REVIEWED_INPUT_HASHES = Object.freeze({
   'scripts/release/lib/trusted-windows-runner.mjs': '9bc7d0789fa581294d781d97035dadcd1f9b30876644674e91e15db14e0c2fd4',
   'scripts/release/release-toolchain.json': '7bc34cc85df605d895c51a01613fbb94ad7c328fed15bf1aeae6090d48d1fa17',
@@ -1350,6 +1351,20 @@ describe('preflight production surface and private core', () => {
     }],
   ])('rejects pre-Task2C1 reviewed-input hashes (%s) before npm or writes', async (_label, hashOverrides) => {
     const state = newState({ hashOverrides })
+    const core = await extractedCore(makeDeps(state))
+
+    await expect(core.runEarlyGitPackageGate({ workspaceRoot })).rejects.toThrow(/fixed|reviewed|input/iu)
+    expect(state.calls).not.toContain('command:npm-ci-ignore-scripts')
+    expect(state.writes).toEqual([])
+  })
+
+  it('rejects the pre-handle-fix reviewed runner SHA before npm or writes', async () => {
+    const state = newState({
+      hashOverrides: {
+        'scripts/release/lib/trusted-windows-runner.mjs': PRE_HANDLE_FIX_REVIEWED_RUNNER_SHA256,
+        'scripts/release/release-toolchain.json': REVIEWED_TASK2C1_POLICY_SHA256,
+      },
+    })
     const core = await extractedCore(makeDeps(state))
 
     await expect(core.runEarlyGitPackageGate({ workspaceRoot })).rejects.toThrow(/fixed|reviewed|input/iu)
