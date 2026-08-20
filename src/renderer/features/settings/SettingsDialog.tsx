@@ -917,6 +917,8 @@ function ClaudeCodeSection({
               {updateBusy ? t('claudeUpdate.busy') : t('claudeUpdate.action')}
             </button>
             <p
+              role="status"
+              aria-live="polite"
               className="min-w-0 text-xs"
               data-testid="claude-code-update-status"
               style={{ color: updateState?.reason ? 'var(--error)' : 'var(--text-tertiary)' }}

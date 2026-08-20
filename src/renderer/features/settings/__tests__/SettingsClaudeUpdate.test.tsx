@@ -103,6 +103,14 @@ describe('Settings manual Claude Code update', () => {
     expect(api.updateClaudeCodeNow).not.toHaveBeenCalled();
   });
 
+  it('announces bounded update status changes politely', async () => {
+    await renderModels();
+
+    const status = await screen.findByRole('status');
+    expect(status.getAttribute('aria-live')).toBe('polite');
+    expect(status.textContent).toContain('不会自动更新');
+  });
+
   it('starts exactly one update from an explicit click and stays single-flight on a double click', async () => {
     const update = deferred<ClaudeCodeUpdateSnapshot>();
     const api = installApi({ updateClaudeCodeNow: vi.fn(() => update.promise) });
