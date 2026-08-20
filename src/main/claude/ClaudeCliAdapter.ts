@@ -5,7 +5,9 @@ import path from 'path';
 import { StringDecoder } from 'node:string_decoder';
 import { ClaudeEventParser } from './ClaudeEventParser';
 import {
+  ManagedProcessCleanupUnconfirmedError,
   ProcessSupervisor,
+  type ManagedProcessCleanupCapability,
   type ManagedProcessHandle,
 } from '../processes/ProcessSupervisor';
 import {
@@ -74,6 +76,11 @@ interface ActiveRun {
   stderrBuffer: string;
   stderrDecoder: StringDecoder;
   managedProcess: ManagedProcessHandle;
+  runtimeLease: ClaudeRuntimeLease;
+}
+
+interface PendingRuntimeCleanup {
+  cleanup: ManagedProcessCleanupCapability;
   runtimeLease: ClaudeRuntimeLease;
 }
 
@@ -244,6 +251,7 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
   private readonly terminationForceMs: number;
   private readonly providerEnvironment?: ProviderEnvironmentPort;
   private readonly activeRuns = new Map<string, ActiveRun>();
+  private readonly pendingRuntimeCleanups = new Set<PendingRuntimeCleanup>();
 
   constructor(options: AdapterOptions) {
     super();
@@ -406,6 +414,8 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
         sessionId: stableTaskId(options),
         taskId: stableTaskId(options),
         runId: options.runId,
+        settlement: 'close-only',
+        closeTimeoutMs: this.terminationForceMs,
         options: {
           cwd,
           env: childEnv,
@@ -419,14 +429,20 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
       try {
         this.permissionBroker?.cancelRun(options.runId, 'spawn failed');
       } catch {
-        // Preserve the original pre-child failure while still releasing ownership.
+        // Preserve the original launch failure while retaining cleanup ownership.
       } finally {
-        runtimeLease.release();
+        if (error instanceof ManagedProcessCleanupUnconfirmedError) {
+          this.pendingRuntimeCleanups.add({
+            cleanup: error.cleanup,
+            runtimeLease,
+          });
+        } else {
+          runtimeLease.release();
+        }
       }
       throw error;
     }
     const child: ChildProcess = managedProcess.child;
-    this.permissionBroker?.bindProcess(options.runId, child.pid ?? null);
 
     const active: ActiveRun = {
       options,
@@ -505,13 +521,28 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
         });
       }
     });
-    child.once('close', (code, signal) => {
+    let finalized = false;
+    const finalizeRun = (
+      code: number | null,
+      signal: string | null,
+      processError?: string,
+    ): void => {
+      if (finalized) return;
+      finalized = true;
       try {
         parser.flush();
         flushStderr();
         if (!active.stopped && !active.terminalEmitted) {
           active.terminalEmitted = true;
-          if (code === 0) {
+          if (processError) {
+            emitSafe({
+              type: 'session_failed',
+              sessionId: active.claudeSessionId || undefined,
+              error: `无法启动 Claude Code：${processError}`,
+              duration: Date.now() - active.startedAt,
+              timestamp: Date.now(),
+            });
+          } else if (code === 0) {
             emitSafe({
               type: 'session_completed',
               sessionId: active.claudeSessionId,
@@ -537,7 +568,36 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
           active.runtimeLease.release();
         }
       }
-    });
+    };
+    child.once('close', (code, signal) => finalizeRun(code, signal));
+    void managedProcess.waitForExit().then(
+      (exit) => finalizeRun(exit.exitCode, exit.signal, exit.error),
+      () => finalizeRun(null, null, 'process supervision failed'),
+    ).catch(() => undefined);
+
+    try {
+      this.permissionBroker?.bindProcess(options.runId, child.pid ?? null);
+    } catch (bindError) {
+      active.stopped = true;
+      try {
+        this.permissionBroker?.cancelRun(options.runId, 'process bind failed');
+      } catch {
+        // Process ownership and lease cleanup still take priority.
+      }
+      try {
+        const exit = await managedProcess.terminate({
+          graceMs: this.terminationGraceMs,
+          forceMs: this.terminationForceMs,
+        });
+        finalizeRun(exit.exitCode, exit.signal, exit.error);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [bindError, cleanupError],
+          'Claude process binding failed and cleanup could not be confirmed.',
+        );
+      }
+      throw bindError;
+    }
 
     emitSafe({
       type: 'session_started',
@@ -567,7 +627,14 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
   }
 
   async stopAll(): Promise<void> {
-    await Promise.all([...this.activeRuns.keys()].map((runId) => this.stopRun(runId)));
+    await Promise.all([
+      ...[...this.activeRuns.keys()].map((runId) => this.stopRun(runId)),
+      ...[...this.pendingRuntimeCleanups].map(async (pending) => {
+        await pending.cleanup.retryCleanup({ forceMs: this.terminationForceMs });
+        this.pendingRuntimeCleanups.delete(pending);
+        pending.runtimeLease.release();
+      }),
+    ]);
   }
 
   subscribe(listener: (envelope: ClaudeEventEnvelope) => void): () => void {

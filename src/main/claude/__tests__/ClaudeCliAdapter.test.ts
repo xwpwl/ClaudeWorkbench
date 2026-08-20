@@ -13,6 +13,11 @@ import type {
 } from '../ClaudeInvocationResolver';
 import { ClaudeRuntimeMutationGate } from '../ClaudeRuntimeMutationGate';
 import {
+  ManagedProcessCleanupUnconfirmedError,
+  ProcessSupervisor,
+  type ProcessJournalStore,
+} from '../../processes/ProcessSupervisor';
+import {
   buildClaudeArgs,
   ClaudeCliAdapter,
   type PermissionBrokerPort,
@@ -35,6 +40,16 @@ class FakeChildProcess extends EventEmitter {
     super();
     this.pid = pid;
   }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 interface SpawnCall {
@@ -64,6 +79,9 @@ function createHarness(config: {
   invocation?: ResolvedClaudeInvocation;
   resolution?: ClaudeInvocationResolution;
   spawnError?: Error;
+  processSupervisor?: ProcessSupervisor;
+  terminationGraceMs?: number;
+  terminationForceMs?: number;
 } = {}) {
   const calls: SpawnCall[] = [];
   let nextPid = 4000;
@@ -99,6 +117,13 @@ function createHarness(config: {
       invocationResolver: { resolve },
       runtimeGate: gate,
       spawnProcess,
+      ...(config.processSupervisor ? { processSupervisor: config.processSupervisor } : {}),
+      ...(config.terminationGraceMs === undefined
+        ? {}
+        : { terminationGraceMs: config.terminationGraceMs }),
+      ...(config.terminationForceMs === undefined
+        ? {}
+        : { terminationForceMs: config.terminationForceMs }),
       ...(config.permissionBroker
         ? {
             permissionBroker: config.permissionBroker,
@@ -327,6 +352,119 @@ describe('ClaudeCliAdapter', () => {
       version: '2.1.218 (Claude Code)',
     });
     expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0);
+  });
+
+  it('keeps an installation lease after child error until close confirms ownership ended', async () => {
+    const harness = createHarness();
+
+    const installation = harness.adapter.checkInstallation();
+    harness.calls[0].child.emit('error', new Error('synthetic launch error'));
+
+    await expect(installation).resolves.toEqual({
+      installed: false,
+      path: null,
+      version: null,
+    });
+    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(1);
+
+    harness.calls[0].child.emit('close', null, null);
+
+    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0);
+  });
+
+  it('finalizes a run whose child closes before the start journal resolves', async () => {
+    const startJournal = deferred<void>();
+    const child = new FakeChildProcess(7100);
+    const journal: ProcessJournalStore = {
+      recordStarted: vi.fn(() => startJournal.promise),
+      recordExited: vi.fn(),
+    };
+    const spawnProcess = vi.fn(() => child as unknown as ChildProcess) as unknown as typeof import('child_process').spawn;
+    const processSupervisor = new ProcessSupervisor({
+      journal,
+      spawnProcess,
+      platform: 'linux',
+    });
+    const harness = createHarness({ processSupervisor });
+    const envelopes: ClaudeEventEnvelope[] = [];
+    harness.adapter.subscribe((envelope) => envelopes.push(envelope));
+
+    const run = harness.adapter.runPrompt(runOptions());
+    await vi.waitFor(() => expect(journal.recordStarted).toHaveBeenCalledOnce());
+    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(1);
+
+    child.emit('close', 0, null);
+    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(1);
+    startJournal.resolve();
+    await expect(run).resolves.toEqual({ runId: 'run-1', pid: 7100 });
+    await vi.waitFor(() => expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0));
+
+    expect(await harness.adapter.stopRun('run-1')).toBe(false);
+    expect(envelopes.filter((item) => item.event.type === 'session_completed')).toHaveLength(1);
+  });
+
+  it('retains cleanup ownership and the ordinary lease when start-journal cleanup is unconfirmed', async () => {
+    const child = new FakeChildProcess(7200);
+    let closeOnKill = false;
+    vi.mocked(child.kill).mockImplementation(() => {
+      child.killed = true;
+      if (closeOnKill) queueMicrotask(() => child.emit('close', null, 'SIGKILL'));
+      return true;
+    });
+    const journal: ProcessJournalStore = {
+      recordStarted: vi.fn(() => { throw new Error('synthetic journal rejection'); }),
+      recordExited: vi.fn(),
+    };
+    const spawnProcess = vi.fn(() => child as unknown as ChildProcess) as unknown as typeof import('child_process').spawn;
+    const processSupervisor = new ProcessSupervisor({
+      journal,
+      spawnProcess,
+      platform: 'linux',
+    });
+    const harness = createHarness({
+      processSupervisor,
+      terminationForceMs: 1,
+    });
+
+    let rejection: unknown;
+    try {
+      await harness.adapter.runPrompt(runOptions());
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect(rejection).toBeInstanceOf(ManagedProcessCleanupUnconfirmedError);
+    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(1);
+    expect(child.kill).toHaveBeenCalledTimes(1);
+
+    closeOnKill = true;
+    await harness.adapter.stopAll();
+
+    expect(child.kill).toHaveBeenCalledTimes(2);
+    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0);
+  });
+
+  it('owns and closes the child before rejecting a permission process-bind failure', async () => {
+    const broker = permissionBroker();
+    vi.mocked(broker.bindProcess).mockImplementation(() => {
+      throw new Error('synthetic bind failure');
+    });
+    const harness = createHarness({
+      permissionBroker: broker,
+      terminationGraceMs: 1,
+      terminationForceMs: 1,
+    });
+
+    await expect(harness.adapter.runPrompt(runOptions({
+      projectId: 'project-1',
+      taskId: 'task-1',
+    }))).rejects.toThrow('synthetic bind failure');
+
+    expect(harness.calls[0].child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(broker.cancelRun).toHaveBeenCalledWith('run-1', 'process bind failed');
+    expect(broker.completeRun).toHaveBeenCalledWith('run-1');
+    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0);
+    expect(await harness.adapter.stopRun('run-1')).toBe(false);
   });
 
   it('does not resolve or spawn while update ownership is active', async () => {
