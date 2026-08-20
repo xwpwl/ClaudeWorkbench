@@ -316,12 +316,9 @@ export class SupervisedClaudeUpdateCommandRunner implements ClaudeUpdateCommandR
       if (boundaryReason !== null) return;
       boundaryReason = reason;
       try {
-        boundaryTermination = Promise.resolve(handle.terminate()).then(
-          () => undefined,
-          () => {
-            throw new ClaudeUpdateRunnerFailure("cleanup_unconfirmed");
-          },
-        );
+        boundaryTermination = pendingHandle.retry().then(() => {
+          this.pendingCleanups.delete(pendingHandle);
+        });
       } catch {
         boundaryTermination = Promise.reject(
           new ClaudeUpdateRunnerFailure("cleanup_unconfirmed"),
@@ -406,7 +403,15 @@ export class SupervisedClaudeUpdateCommandRunner implements ClaudeUpdateCommandR
 
   private retainHandle(handle: ManagedProcessHandle): PendingCleanup {
     const pending: PendingCleanup = {
-      retry: () => handle.terminate().then(() => undefined),
+      retry: async () => {
+        try {
+          await handle.terminate();
+        } catch {
+          if (this.isHandleActive(handle)) {
+            throw new ClaudeUpdateRunnerFailure("cleanup_unconfirmed");
+          }
+        }
+      },
     };
     this.pendingCleanups.add(pending);
     void handle.waitForExit().then(

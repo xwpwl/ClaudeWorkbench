@@ -629,7 +629,6 @@ interface SyntheticHandleControl {
   readonly terminate: ReturnType<typeof vi.fn>;
   close(exitCode?: number | null, error?: string): void;
   rejectWait(error: unknown, closeConfirmed: boolean): void;
-  isClosed(): boolean;
 }
 
 function processExit(
@@ -702,7 +701,6 @@ function syntheticHandle(
     terminate,
     close,
     rejectWait,
-    isClosed: () => closed,
   };
 }
 
@@ -717,28 +715,33 @@ function runnerHarness(
 ) {
   const requests: ManagedProcessRequest[] = [];
   const controls: SyntheticHandleControl[] = [];
+  const activeHandles = new Map<string, ManagedProcessHandle>();
   const supervisor = {
     spawn: vi.fn(async (request: ManagedProcessRequest) => {
       requests.push(request);
-      if (options.spawn) return options.spawn(request);
-      const control = syntheticHandle({
-        id: `synthetic-${controls.length + 1}`,
-        pid: 4242 + controls.length,
-      });
-      controls.push(control);
-      return control.handle;
+      const handle = options.spawn
+        ? await options.spawn(request)
+        : (() => {
+            const control = syntheticHandle({
+              id: `synthetic-${controls.length + 1}`,
+              pid: 4242 + controls.length,
+            });
+            controls.push(control);
+            return control.handle;
+          })();
+      activeHandles.set(handle.id, handle);
+      handle.child.once("close", () => activeHandles.delete(handle.id));
+      return handle;
     }),
     getActiveProcesses: vi.fn(() =>
       options.activeProcesses
         ? [...options.activeProcesses()]
-        : controls
-            .filter((control) => !control.isClosed())
-            .map((control) => ({
-              id: control.handle.id,
-              pid: control.handle.pid,
-              kind: "claude" as const,
-              startedAt: control.handle.startedAt,
-            })),
+        : [...activeHandles.values()].map((handle) => ({
+            id: handle.id,
+            pid: handle.pid,
+            kind: "claude" as const,
+            startedAt: handle.startedAt,
+          })),
     ),
   } as unknown as Pick<ProcessSupervisor, "spawn" | "getActiveProcesses">;
   const runner = new SupervisedClaudeUpdateCommandRunner(
@@ -902,6 +905,130 @@ describe("SupervisedClaudeUpdateCommandRunner", () => {
       } finally {
         vi.useRealTimers();
       }
+    },
+  );
+
+  it("maps overflow termination journal failure after confirmed close to update_failed and releases the manager gate", async () => {
+    const preVersion = syntheticHandle({ id: "confirmed-overflow-version" });
+    const update = syntheticHandle({ id: "confirmed-overflow-update" });
+    update.terminate.mockImplementationOnce(() => {
+      update.rejectWait(new Error("private-overflow-journal-sentinel"), true);
+      return update.handle.waitForExit();
+    });
+    const test = runnerHarness({
+      spawn: (request) =>
+        request.args?.at(-1) === "--version"
+          ? preVersion.handle
+          : update.handle,
+    });
+    const gate = new ClaudeRuntimeMutationGate();
+    const manager = new ClaudeCodeUpdateManager({
+      resolver: { resolve: () => resolved() },
+      runtimeGate: gate,
+      runner: test.runner,
+      hasActiveTasks: () => false,
+      isFakeRuntime: () => false,
+    });
+
+    const updating = manager.updateNow();
+    await waitForRequest(test.requests);
+    preVersion.child.stdout.emit("data", Buffer.from("2.1.218"));
+    preVersion.close(0);
+    await waitForRequest(test.requests, 2);
+    update.child.stdout.emit("data", Buffer.alloc(256 * 1024 + 1));
+
+    await expect(updating).resolves.toEqual({
+      status: "error",
+      reason: "update_failed",
+      beforeVersion: "2.1.218",
+      afterVersion: null,
+    });
+    expect(update.terminate).toHaveBeenCalledOnce();
+    expect(gate.snapshot().updateActive).toBe(false);
+    await expect(manager.dispose()).resolves.toBeUndefined();
+    expect(update.terminate).toHaveBeenCalledOnce();
+  });
+
+  it("releases retained ownership when disposal confirms close before the exit journal rejects", async () => {
+    vi.useFakeTimers();
+    try {
+      const preVersion = syntheticHandle({ id: "dispose-journal-version" });
+      const update = syntheticHandle({ id: "dispose-journal-update" });
+      update.terminate
+        .mockImplementationOnce(async () => {
+          throw new Error("private-active-termination-sentinel");
+        })
+        .mockImplementationOnce(() => {
+          update.rejectWait(new Error("private-dispose-journal-sentinel"), true);
+          return update.handle.waitForExit();
+        });
+      const test = runnerHarness({
+        spawn: (request) =>
+          request.args?.at(-1) === "--version"
+            ? preVersion.handle
+            : update.handle,
+      });
+      const gate = new ClaudeRuntimeMutationGate();
+      const manager = new ClaudeCodeUpdateManager({
+        resolver: { resolve: () => resolved() },
+        runtimeGate: gate,
+        runner: test.runner,
+        hasActiveTasks: () => false,
+        isFakeRuntime: () => false,
+      });
+
+      const updating = manager.updateNow();
+      await waitForRequest(test.requests);
+      preVersion.child.stdout.emit("data", Buffer.from("2.1.218"));
+      preVersion.close(0);
+      await waitForRequest(test.requests, 2);
+      await vi.advanceTimersByTimeAsync(300_000);
+
+      await expect(updating).resolves.toMatchObject({
+        status: "error",
+        reason: "cleanup_unconfirmed",
+      });
+      expect(gate.snapshot().updateActive).toBe(true);
+      await expect(manager.dispose()).resolves.toBeUndefined();
+      expect(update.terminate).toHaveBeenCalledTimes(2);
+      expect(gate.snapshot().updateActive).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ["the exact id and pid remain active", undefined],
+    [
+      "active-process inspection throws",
+      () => {
+        throw new Error("private-active-inspection-sentinel");
+      },
+    ],
+  ] as const)(
+    "retains cleanup ownership when termination rejects and %s",
+    async (_label, activeProcesses) => {
+      const test = runnerHarness(
+        activeProcesses === undefined ? {} : { activeProcesses },
+      );
+      const running = test.runner
+        .runUpdate(BASE_INVOCATION)
+        .catch((error: unknown) => error);
+      await waitForRequest(test.requests);
+      test.controls[0].terminate.mockRejectedValue(
+        new Error("private-unconfirmed-termination-sentinel"),
+      );
+      test.controls[0].child.stdout.emit(
+        "data",
+        Buffer.alloc(256 * 1024 + 1),
+      );
+
+      expect(failureReason(await running)).toBe("cleanup_unconfirmed");
+      await expect(test.runner.dispose()).rejects.toMatchObject({
+        reason: "cleanup_unconfirmed",
+      });
+      expect(test.controls[0].terminate).toHaveBeenCalledTimes(2);
     },
   );
 
