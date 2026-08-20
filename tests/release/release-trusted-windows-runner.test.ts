@@ -6,7 +6,7 @@ import path from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import vm from 'node:vm'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 
 const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const runnerPath = path.join(workspaceRoot, 'scripts', 'release', 'lib', 'trusted-windows-runner.mjs')
@@ -455,7 +455,7 @@ async function snapshotNodeModulesTree(root: string): Promise<NodeModulesTreeSna
 }
 
 async function createLockedVitestCacheFixture(label: string): Promise<{ nodeModulesRoot: string, root: string }> {
-  const parent = path.join(workspaceRoot, 'release-validation', 'task2c1-vitest-cache-fixtures')
+  const parent = fixtureParentDirectory('vitest-cache')
   await fs.mkdir(parent, { recursive: true })
   const root = await fs.mkdtemp(path.join(parent, `${label}-`))
   disposableRoots.push(root)
@@ -517,10 +517,60 @@ async function runLockedVitestCacheFixture(root: string, noCache: boolean): Prom
 }
 
 const disposableRoots: string[] = []
+const releaseValidationRoot = path.join(workspaceRoot, 'release-validation')
+const fixtureSuiteRoot = path.join(releaseValidationRoot, `task2c1-fixtures-${process.pid}-${crypto.randomUUID()}`)
+const fixtureParentDirectories = [
+  'cmd-baseline',
+  'controller',
+  'git',
+  'held-input',
+  'policy',
+  'reporter',
+  'vitest-cache',
+].map((name) => path.join(fixtureSuiteRoot, name))
+let releaseValidationRootExistedBeforeSuite = false
+
+function fixtureParentDirectory(name: string): string {
+  return path.join(fixtureSuiteRoot, name)
+}
+
+async function directoryExists(directory: string): Promise<boolean> {
+  try {
+    return (await fs.stat(directory)).isDirectory()
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+}
+
+async function removeEmptyDirectory(directory: string, allowNonEmpty: boolean): Promise<void> {
+  try {
+    await fs.rmdir(directory)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') return
+    if (allowNonEmpty && (code === 'ENOTEMPTY' || code === 'EEXIST')) return
+    throw error
+  }
+}
+
+beforeAll(async () => {
+  releaseValidationRootExistedBeforeSuite = await directoryExists(releaseValidationRoot)
+})
 
 afterEach(async () => {
   for (const root of disposableRoots.splice(0)) {
     await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+afterAll(async () => {
+  for (const parent of fixtureParentDirectories) {
+    await removeEmptyDirectory(parent, false)
+  }
+  await removeEmptyDirectory(fixtureSuiteRoot, false)
+  if (!releaseValidationRootExistedBeforeSuite) {
+    await removeEmptyDirectory(releaseValidationRoot, true)
   }
 })
 
@@ -860,7 +910,7 @@ async function runProcessHandleLifetimeProbe(mode: ProcessHandleLifetimeProbe['m
 }
 
 async function copyRunnerWorkspace(policyBytes: Uint8Array, runnerBytes?: Uint8Array): Promise<URL> {
-  const parent = path.join(workspaceRoot, 'release-validation', 'task2c1-policy-fixtures')
+  const parent = fixtureParentDirectory('policy')
   await fs.mkdir(parent, { recursive: true })
   const root = await fs.mkdtemp(path.join(parent, 'workspace-'))
   disposableRoots.push(root)
@@ -944,7 +994,7 @@ async function reviewedMainWorktree(): Promise<string> {
 }
 
 async function createGitRunnerWorkspace(): Promise<{ root: string, runnerUrl: URL }> {
-  const parent = path.join(workspaceRoot, 'release-validation', 'task2c1-git-fixtures')
+  const parent = fixtureParentDirectory('git')
   await fs.mkdir(parent, { recursive: true })
   const root = await fs.mkdtemp(path.join(parent, 'workspace-'))
   disposableRoots.push(root)
@@ -1072,7 +1122,7 @@ async function createTestFullRunnerWorkspace(mode: 'normal' | 'prelaunch-mutatio
     )
   }
   source = synchronizeDescriptorHash(source)
-  const parent = path.join(workspaceRoot, 'release-validation', 'task2c1-held-input-fixtures')
+  const parent = fixtureParentDirectory('held-input')
   await fs.mkdir(parent, { recursive: true })
   const root = await fs.mkdtemp(path.join(parent, 'workspace-'))
   disposableRoots.push(root)
@@ -1222,7 +1272,7 @@ async function createControllerTreeFixture(mode: 'timeout' | 'stdout' | 'stderr'
   markerPath: string
   request: Record<string, unknown>
 }> {
-  const parent = path.join(workspaceRoot, 'release-validation', 'task2c1-controller-fixtures')
+  const parent = fixtureParentDirectory('controller')
   await fs.mkdir(parent, { recursive: true })
   const root = await fs.mkdtemp(path.join(parent, 'fixture-'))
   disposableRoots.push(root)
@@ -1330,7 +1380,7 @@ describe('bounded Vitest preflight reporter', () => {
   })
 
   it('uses its module-owned repository root during a real installed Vitest 3.2.7 invocation', async () => {
-    const parent = path.join(workspaceRoot, 'release-validation', 'task2c1-reporter-fixtures')
+    const parent = fixtureParentDirectory('reporter')
     await fs.mkdir(parent, { recursive: true })
     const alternateCwd = await fs.mkdtemp(path.join(parent, 'cwd-'))
     disposableRoots.push(alternateCwd)
@@ -1725,7 +1775,7 @@ describe('trusted Windows runner production surface', () => {
   }, 180_000)
 
   it('matches the existing-marker canonical tree serializer to independent exact bytes and hash', async () => {
-    const parent = path.join(workspaceRoot, 'release-validation', 'task2c1-controller-fixtures')
+    const parent = fixtureParentDirectory('controller')
     await fs.mkdir(parent, { recursive: true })
     const root = await fs.mkdtemp(path.join(parent, 'canonical-tree-'))
     disposableRoots.push(root)
@@ -1992,7 +2042,7 @@ describe('trusted Windows runner production surface', () => {
       chainErrors: 0,
     })
 
-    const parent = path.join(workspaceRoot, 'release-validation', 'task2c1-cmd-baseline-fixtures')
+    const parent = fixtureParentDirectory('cmd-baseline')
     await fs.mkdir(parent, { recursive: true })
     const root = await fs.mkdtemp(path.join(parent, 'invalid-substitute-'))
     disposableRoots.push(root)
@@ -2213,7 +2263,7 @@ describe('trusted Windows runner production surface', () => {
   }, 180_000)
 
   it('round-trips the exact Windows argv vector through CreateProcessW', async () => {
-    const parent = path.join(workspaceRoot, 'release-validation', 'task2c1-controller-fixtures')
+    const parent = fixtureParentDirectory('controller')
     await fs.mkdir(parent, { recursive: true })
     const root = await fs.mkdtemp(path.join(parent, 'argv-'))
     disposableRoots.push(root)
@@ -2237,7 +2287,7 @@ describe('trusted Windows runner production surface', () => {
   }, 40_000)
 
   it('rejects duplicate keys, type drift, and blocked environment before target creation', async () => {
-    const parent = path.join(workspaceRoot, 'release-validation', 'task2c1-controller-fixtures')
+    const parent = fixtureParentDirectory('controller')
     await fs.mkdir(parent, { recursive: true })
     const root = await fs.mkdtemp(path.join(parent, 'request-'))
     disposableRoots.push(root)
