@@ -106,9 +106,21 @@ function defaultLocate(platform: NodeJS.Platform): readonly string[] {
       .split(/\r?\n/u)
       .map((candidate) => candidate.trim())
       .filter(Boolean);
-  } catch {
-    return [];
+  } catch (error) {
+    if (isDocumentedLocatorMiss(error)) return [];
+    throw error;
   }
+}
+
+function isDocumentedLocatorMiss(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "status" in error &&
+    (error as { readonly status?: unknown }).status === 1 &&
+    (!("signal" in error) ||
+      (error as { readonly signal?: unknown }).signal === null)
+  );
 }
 
 function sameFileFacts(
@@ -122,6 +134,16 @@ function sameFileFacts(
     left.mtimeMs === right.mtimeMs &&
     left.file === right.file &&
     left.symbolicLink === right.symbolicLink
+  );
+}
+
+function sameFileObservation(
+  left: FileObservation,
+  right: FileObservation,
+): boolean {
+  return (
+    left.canonicalPath === right.canonicalPath &&
+    sameFileFacts(left.facts, right.facts)
   );
 }
 
@@ -202,7 +224,7 @@ export class ClaudeInvocationResolver implements ClaudeInvocationResolverPort {
     try {
       located = this.locate();
     } catch {
-      located = [];
+      return UNSUPPORTED_INSTALLATION;
     }
 
     const firstCandidate = located
@@ -308,19 +330,24 @@ export class ClaudeInvocationResolver implements ClaudeInvocationResolverPort {
       "claude-code",
     );
     const cliPath = this.pathApi.join(packageRoot, "cli.js");
-    const observed = this.observeOrdinaryFile(cliPath);
-    if (observed.kind !== "observed") return observed;
-    const { observation } = observed;
-
-    const canonicalPackageRoot = this.observeStableRealpath(packageRoot);
+    const first = this.observeNpmComposite(packageRoot, cliPath);
+    if (first.kind !== "observed") return first;
+    const second = this.observeNpmComposite(packageRoot, cliPath);
+    if (second.kind !== "observed") return second;
     if (
-      !canonicalPackageRoot ||
-      !this.isCanonicalCase(observation.canonicalPath) ||
+      !sameFileObservation(first.packageRoot, second.packageRoot) ||
+      !sameFileObservation(first.cli, second.cli) ||
+      !this.isCanonicalCase(first.cli.canonicalPath) ||
+      !this.isCanonicalCase(second.cli.canonicalPath) ||
       !this.isExactOrDescendant(
-        canonicalPackageRoot,
-        observation.canonicalPath,
+        first.packageRoot.canonicalPath,
+        first.cli.canonicalPath,
       ) ||
-      this.isForbidden(displayPath, cliPath, observation.canonicalPath)
+      !this.isExactOrDescendant(
+        second.packageRoot.canonicalPath,
+        second.cli.canonicalPath,
+      ) ||
+      this.isForbidden(displayPath, cliPath, first.cli.canonicalPath)
     ) {
       return { kind: "unsupported" };
     }
@@ -329,37 +356,67 @@ export class ClaudeInvocationResolver implements ClaudeInvocationResolverPort {
       kind: "resolved",
       invocation: this.freezeInvocation({
         executable: this.electronExecutable,
-        prefixArgs: [observation.canonicalPath],
+        prefixArgs: [first.cli.canonicalPath],
         environmentPatch: NPM_ENVIRONMENT_PATCH,
         displayPath,
-        canonicalTargetPath: observation.canonicalPath,
+        canonicalTargetPath: first.cli.canonicalPath,
         provenance: "npm",
       }),
     };
   }
 
+  private observeNpmComposite(
+    packageRoot: string,
+    cliPath: string,
+  ):
+    | {
+        readonly kind: "observed";
+        readonly packageRoot: FileObservation;
+        readonly cli: FileObservation;
+      }
+    | { readonly kind: "missing" }
+    | { readonly kind: "unsupported" } {
+    const root = this.observePath(packageRoot, "directory");
+    if (root.kind !== "observed") return root;
+    const cli = this.observePath(cliPath, "file");
+    if (cli.kind !== "observed") return cli;
+    return {
+      kind: "observed",
+      packageRoot: root.observation,
+      cli: cli.observation,
+    };
+  }
+
   private observeOrdinaryFile(filePath: string): FileObservationAttempt {
+    const first = this.observePath(filePath, "file");
+    if (first.kind !== "observed") return first;
+    const second = this.observePath(filePath, "file");
+    if (second.kind !== "observed") return second;
+    return sameFileObservation(first.observation, second.observation)
+      ? first
+      : { kind: "unsupported" };
+  }
+
+  private observePath(
+    filePath: string,
+    expected: "file" | "directory",
+  ): FileObservationAttempt {
     try {
-      const firstFacts = this.readFileFacts(filePath);
-      const firstRealpath = this.filesystem.realpath(filePath);
-      const secondFacts = this.readFileFacts(filePath);
-      const secondRealpath = this.filesystem.realpath(filePath);
+      const facts = this.readFileFacts(filePath);
+      const canonicalPath = this.filesystem.realpath(filePath);
+      const expectedType = expected === "file" ? facts.file : !facts.file;
       if (
-        !firstFacts.file ||
-        firstFacts.symbolicLink ||
-        !secondFacts.file ||
-        secondFacts.symbolicLink ||
-        !sameFileFacts(firstFacts, secondFacts) ||
-        firstRealpath !== secondRealpath ||
-        !this.isSafeAbsolutePath(firstRealpath)
+        !expectedType ||
+        facts.symbolicLink ||
+        !this.isSafeAbsolutePath(canonicalPath)
       ) {
         return { kind: "unsupported" };
       }
       return {
         kind: "observed",
         observation: Object.freeze({
-          canonicalPath: this.pathApi.normalize(firstRealpath),
-          facts: firstFacts,
+          canonicalPath: this.pathApi.normalize(canonicalPath),
+          facts,
         }),
       };
     } catch (error) {

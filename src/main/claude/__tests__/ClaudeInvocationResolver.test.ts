@@ -26,6 +26,17 @@ interface HarnessOptions {
   readonly files?: Readonly<Record<string, FileFacts | readonly FileFacts[]>>;
   readonly realpaths?: Readonly<Record<string, string | readonly string[]>>;
   readonly directoryEntries?: Readonly<Record<string, readonly string[]>>;
+  readonly locateError?: Error;
+  readonly realpathHook?: (
+    filePath: string,
+    call: number,
+    defaultTarget: string,
+  ) => string;
+  readonly lstatHook?: (
+    filePath: string,
+    call: number,
+    defaultFacts: FileFacts,
+  ) => FileFacts;
 }
 
 function ordinaryFile(overrides: Partial<FileFacts> = {}): FileFacts {
@@ -86,29 +97,53 @@ function resolverHarness(options: HarnessOptions = {}) {
         touched.realpath.push(filePath);
         const key = keyOf(filePath);
         const sequence = realpaths.get(key);
+        const call = realpathCalls.get(key) ?? 0;
+        realpathCalls.set(key, call + 1);
+        let target: string;
         if (sequence) {
-          const call = realpathCalls.get(key) ?? 0;
-          realpathCalls.set(key, call + 1);
-          return pathApi.normalize(
+          target = pathApi.normalize(
             sequence[Math.min(call, sequence.length - 1)],
           );
+        } else {
+          const file = files.get(key);
+          target = file ? file.canonicalPath : pathApi.normalize(filePath);
         }
-        const file = files.get(key);
-        if (file) return file.canonicalPath;
-        return pathApi.normalize(filePath);
+        return options.realpathHook?.(filePath, call, target) ?? target;
       },
       lstat(filePath) {
         touched.lstat.push(filePath);
         const key = keyOf(filePath);
         const entry = files.get(key);
-        if (!entry)
-          throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
         const call = lstatCalls.get(key) ?? 0;
         lstatCalls.set(key, call + 1);
-        const sequence = Array.isArray(entry.facts)
-          ? entry.facts
-          : [entry.facts];
-        const facts = sequence[Math.min(call, sequence.length - 1)];
+        let defaultFacts: FileFacts;
+        if (entry) {
+          const sequence = Array.isArray(entry.facts)
+            ? entry.facts
+            : [entry.facts];
+          defaultFacts = sequence[Math.min(call, sequence.length - 1)];
+        } else {
+          const normalized = pathApi.normalize(filePath);
+          const isKnownDirectory = knownCanonicalPaths().some((candidate) => {
+            const relative = pathApi.relative(normalized, candidate);
+            return (
+              relative !== "" &&
+              relative !== ".." &&
+              !relative.startsWith(`..${pathApi.sep}`) &&
+              !pathApi.isAbsolute(relative)
+            );
+          });
+          if (!isKnownDirectory) {
+            throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+          }
+          defaultFacts = ordinaryFile({
+            ino: normalized.length,
+            size: 0,
+            file: false,
+          });
+        }
+        const facts =
+          options.lstatHook?.(filePath, call, defaultFacts) ?? defaultFacts;
         return {
           dev: facts.dev,
           ino: facts.ino,
@@ -152,6 +187,7 @@ function resolverHarness(options: HarnessOptions = {}) {
     untrustedRoots: options.untrustedRoots,
     locate: () => {
       locateCalls += 1;
+      if (options.locateError) throw options.locateError;
       return options.located ?? [];
     },
     filesystem,
@@ -316,6 +352,26 @@ describe("ClaudeInvocationResolver", () => {
     expect(test.touched.lstat).not.toContain(npmCli);
   });
 
+  it("fails closed when the locator throws instead of authorizing a fallback", () => {
+    const fallback =
+      "C:\\Users\\Ada\\AppData\\Local\\Programs\\claude\\claude.exe";
+    const test = resolverHarness({
+      locateError: new Error("locator timed out"),
+      environment: {
+        LOCALAPPDATA: "C:\\Users\\Ada\\AppData\\Local",
+      },
+      files: { [fallback]: ordinaryFile() },
+    });
+
+    expect(test.resolver.resolve()).toEqual({
+      ok: false,
+      reason: "unsupported_installation",
+    });
+    expect(test.touched.lstat).toEqual([]);
+    expect(test.touched.realpath).toEqual([]);
+    expect(test.touched.readdir).toEqual([]);
+  });
+
   it("uses the fixed npm fallback after absent native fallbacks", () => {
     const cli =
       "C:\\Users\\Ada\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js";
@@ -462,6 +518,60 @@ describe("ClaudeInvocationResolver", () => {
       located: ["C:\\npm\\claude.cmd"],
       files: { [cli]: ordinaryFile() },
       realpaths: { [cli]: "C:\\outside\\cli.js" },
+    });
+
+    expect(test.resolver.resolve()).toEqual({
+      ok: false,
+      reason: "unsupported_installation",
+    });
+  });
+
+  it("rejects an npm package root whose identity changes across composite observations", () => {
+    const packageRoot = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code";
+    const cli = `${packageRoot}\\cli.js`;
+    const test = resolverHarness({
+      located: ["C:\\npm\\claude.cmd"],
+      files: {
+        [packageRoot]: [
+          ordinaryFile({ file: false, ino: 10 }),
+          ordinaryFile({ file: false, ino: 11 }),
+        ],
+        [cli]: ordinaryFile({ ino: 12 }),
+      },
+    });
+
+    expect(test.resolver.resolve()).toEqual({
+      ok: false,
+      reason: "unsupported_installation",
+    });
+  });
+
+  it("rejects coordinated package and cli movement between composite observations", () => {
+    const packageRoot = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code";
+    const cli = `${packageRoot}\\cli.js`;
+    let moved = false;
+    const test = resolverHarness({
+      located: ["C:\\npm\\claude.cmd"],
+      files: {
+        [packageRoot]: ordinaryFile({ file: false, ino: 20 }),
+        [cli]: ordinaryFile({ ino: 21 }),
+      },
+      realpathHook(filePath, call, defaultTarget) {
+        if (filePath === packageRoot && call === 1) {
+          moved = true;
+          return defaultTarget;
+        }
+        if (!moved) return defaultTarget;
+        if (filePath === packageRoot) return "C:\\moved\\claude-code";
+        if (filePath === cli) return "C:\\moved\\claude-code\\cli.js";
+        return defaultTarget;
+      },
+      lstatHook(filePath, _call, defaultFacts) {
+        if (!moved) return defaultFacts;
+        if (filePath === packageRoot) return { ...defaultFacts, ino: 30 };
+        if (filePath === cli) return { ...defaultFacts, ino: 31 };
+        return defaultFacts;
+      },
     });
 
     expect(test.resolver.resolve()).toEqual({
