@@ -1,7 +1,7 @@
 # Manual Claude Code Update Design
 
 > Date: 2026-08-21
-> Status: approved in conversation; awaiting written-spec review
+> Status: approved for implementation; close-owned process amendment recorded 2026-08-21
 > Scope: Claude Workbench desktop settings, manual Claude Code CLI update only
 
 ## 1. Outcome
@@ -136,7 +136,7 @@ dispose(): Promise<void>;
 
 `updateNow()` acquires the update gate synchronously before its first asynchronous boundary. Concurrent calls share the same in-flight promise and cannot start a second child process.
 
-The manager receives dependencies for resolution, version probing, bounded command execution, active-task inspection, runtime-mode inspection, clock access, and public logging. Unit tests replace those dependencies with local fakes.
+The manager receives dependencies for resolution, version probing, bounded command execution, active-task inspection, runtime-mode inspection, and public logging. Unit tests replace those dependencies with local fakes.
 
 ### 5.3 Runtime mutation gate
 
@@ -179,6 +179,12 @@ Production execution uses the existing supervised-process boundary or a narrowly
 - timeout and application shutdown terminate the owned process tree and wait for cleanup confirmation;
 - unresolved cleanup is an error, never success;
 - raw output is retained only transiently in the main process and is neither logged nor returned.
+
+The current `ProcessSupervisor` settles on a child `error` event before `close`. This feature therefore adds an opt-in close-only settlement mode to that existing supervisor. Its default mode and all existing consumers remain unchanged. In close-only mode, `error` is recorded but ownership stays active until `close`; missing-PID and launch-journal failure paths also kill and await bounded close confirmation before returning. The update runner alone enables this mode, then layers stdout/stderr caps and its update timeout over the owned handle. This avoids a second process-tree implementation while preserving existing task and terminal behavior.
+
+If a close-only launch cannot confirm `close` within that bounded launch-cleanup window, the supervisor throws a typed cleanup-unconfirmed error that retains an opaque, idempotent cleanup capability. The capability owns no public path or command data and can only retry the already-owned child's termination/close confirmation; it cannot spawn or target an arbitrary PID. The update runner retains this capability, rejects the transaction as `cleanup_unconfirmed`, and invokes it again from `dispose()`. A confirmed retry clears the retained capability and permits the manager to release its exclusive runtime lease. An unconfirmed retry remains fail-closed and makes shutdown unclean. This ownership transfer is required for both missing-PID and start-journal failure paths so `spawn()` never loses the only object capable of proving final close.
+
+After `spawn()` has returned a normal close-only `ManagedProcessHandle`, the update runner likewise retains that handle until `close`. If timeout, output overflow, or shutdown calls `terminate()` and close cannot be confirmed, the runner keeps the same handle as pending cleanup and retries `terminate()` from `dispose()`. A later close or successful retry clears it; another unconfirmed result keeps the runtime gate latched and shutdown unclean. Thus both pre-handle and post-handle cleanup failures retain one retryable owner.
 
 The update command may use the network internally because that is Claude Code's own documented behavior, but Workbench neither constructs a download URL nor directly communicates with an update service.
 
@@ -243,7 +249,7 @@ One click executes this transaction:
 9. Run `--version` on the post-update invocation.
 10. Require a valid version that is not lower than the pre-update version.
 11. Return `updated` when the version increased, or `up_to_date` when it is unchanged.
-12. Release the acquired exclusive lease exactly once in `finally`.
+12. Release the acquired exclusive lease exactly once only after child close and cleanup are confirmed. If cleanup is unconfirmed, return `error/cleanup_unconfirmed` but retain the exclusive lease and disable further updates and Claude tasks for the rest of the session; `dispose()` makes one final supervised cleanup attempt and releases the lease only if that attempt is confirmed. A failed final cleanup makes shutdown unclean rather than reopening execution.
 
 An exit-zero update followed by missing, malformed, lower, or differently resolved Claude Code is `error`, not success.
 
@@ -305,7 +311,8 @@ Implementation follows test-driven development. Tests use synthetic resolver res
 - unchanged valid version returns `up_to_date`;
 - a higher valid version returns `updated`;
 - lower or invalid post-version, identity drift, nonzero exit, spawn error, timeout, output overflow, and cleanup failure return bounded errors;
-- every success and failure releases the gate once and closes streams, timers, handles, and child processes;
+- every cleanup-confirmed success or failure releases the gate once and closes streams, timers, handles, and child processes;
+- `cleanup_unconfirmed` retains the exclusive gate, disables retry/task execution, and releases it only after successful manager disposal;
 - no public snapshot or log contains injected path, secret, environment, stdout, stderr, or raw error sentinels;
 - application shutdown terminates and awaits an owned update process;
 - non-update version/help/diagnostics probes start no Claude child while the update lease is active, and resume only after its terminal cleanup;
@@ -324,6 +331,7 @@ Implementation follows test-driven development. Tests use synthetic resolver res
 
 - opening Settings and rendering the Claude Code section cause zero update calls;
 - unavailable and updating states disable the button;
+- `error/cleanup_unconfirmed` also keeps the button disabled for the rest of the session;
 - `FORCE_FAKE` renders the unavailable state even when the host machine has a real Claude installation;
 - one click invokes the update once and shows busy state;
 - active-task, runtime-busy, timeout, permission, unsupported, identity, and generic failures render localized bounded text;
@@ -339,7 +347,9 @@ Expected production files:
 - `src/main/claude/ClaudeInvocationResolver.ts` (new)
 - `src/main/claude/ClaudeCodeUpdateManager.ts` (new)
 - `src/main/claude/ClaudeRuntimeMutationGate.ts` (new)
+- `src/main/claude/ClaudeRuntimeTaskGuard.ts` (new)
 - `src/main/claude/ClaudeCliAdapter.ts`
+- `src/main/processes/ProcessSupervisor.ts`
 - `src/main/ipc/claude-updates.ts` (new)
 - `src/main/ipc/system.ts`
 - `src/main/index.ts`
@@ -355,6 +365,7 @@ Expected tests:
 - `ClaudeCodeUpdateManager` unit tests;
 - runtime mutation-gate unit and composition tests;
 - existing `ClaudeCliAdapter` and startup-adapter selection tests;
+- existing `ProcessSupervisor` unit and release-boundary tests;
 - Claude update IPC tests;
 - existing system IPC tests;
 - preload contract and transport-surface tests;
