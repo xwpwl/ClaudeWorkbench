@@ -3,6 +3,7 @@ import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 
 export type ManagedProcessKind = 'claude' | 'mcp' | 'terminal';
 export type ManagedProcessSettlement = 'error-or-close' | 'close-only';
+export type ManagedProcessJournalError = 'raw' | 'redacted';
 
 export interface ManagedProcessRequest {
   id?: string;
@@ -15,6 +16,7 @@ export interface ManagedProcessRequest {
   runId?: string;
   settlement?: ManagedProcessSettlement;
   closeTimeoutMs?: number;
+  journalError?: ManagedProcessJournalError;
 }
 
 export interface ProcessStartRecord {
@@ -123,6 +125,7 @@ interface ActiveProcess {
   startJournal: Promise<void>;
   pendingError: unknown | undefined;
   settlement: ManagedProcessSettlement;
+  journalError: ManagedProcessJournalError;
 }
 
 interface RawCloseConfirmation {
@@ -135,6 +138,7 @@ const NULL_JOURNAL: ProcessJournalStore = {
   recordStarted: () => undefined,
   recordExited: () => undefined,
 };
+const REDACTED_JOURNAL_ERROR = 'managed-process-error';
 
 function boundedDelay(value: number | undefined, fallback: number): number {
   if (value === undefined) return fallback;
@@ -293,6 +297,7 @@ export class ProcessSupervisor {
       startJournal: Promise.resolve(),
       pendingError: undefined,
       settlement,
+      journalError: request.journalError ?? 'raw',
     };
     this.active.set(id, active);
 
@@ -478,7 +483,10 @@ export class ProcessSupervisor {
     if (this.active.get(active.start.id) === active) this.active.delete(active.start.id);
     try {
       await active.startJournal;
-      await this.journal.recordExited({ ...record });
+      const journalRecord = active.journalError === 'redacted' && record.error !== undefined
+        ? { ...record, error: REDACTED_JOURNAL_ERROR }
+        : { ...record };
+      await this.journal.recordExited(journalRecord);
       active.resolveExit(record);
     } catch (journalError) {
       active.rejectExit(journalError);

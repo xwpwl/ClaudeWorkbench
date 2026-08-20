@@ -172,6 +172,31 @@ describe('ProcessSupervisor release boundaries', () => {
       error: 'spawn EACCES',
     });
     expect(test.exits).toHaveLength(1);
+    expect(test.exits[0].error).toBe('spawn EACCES');
+  });
+
+  it('keeps a private close-only error in memory while journaling only a fixed redacted failure', async () => {
+    const test = releaseHarness();
+    const handle = await test.supervisor.spawn({
+      kind: 'claude',
+      command: 'claude.exe',
+      settlement: 'close-only',
+      journalError: 'redacted',
+    });
+    const privateError = 'spawn C:\\private\\claude-install\\SENTINEL-token';
+
+    test.children[0].emit('error', new Error(privateError));
+    test.children[0].emit('close', null, null);
+
+    await expect(handle.waitForExit()).resolves.toMatchObject({ error: privateError });
+    expect(test.exits).toHaveLength(1);
+    expect(test.exits[0]).toMatchObject({
+      exitCode: null,
+      signal: null,
+      error: 'managed-process-error',
+    });
+    expect(JSON.stringify(test.exits)).not.toContain('private');
+    expect(JSON.stringify(test.exits)).not.toContain('SENTINEL');
   });
 
   it('computes a non-negative lifecycle duration from the injected clock', async () => {

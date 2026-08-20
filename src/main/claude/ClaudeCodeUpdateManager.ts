@@ -258,6 +258,7 @@ export class SupervisedClaudeUpdateCommandRunner implements ClaudeUpdateCommandR
       args: [...invocation.prefixArgs, suffix],
       settlement: "close-only",
       closeTimeoutMs: CLOSE_TIMEOUT_MS,
+      journalError: "redacted",
       options: {
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],

@@ -776,6 +776,7 @@ describe("SupervisedClaudeUpdateCommandRunner", () => {
       command: "node-test",
       args: ["C:\\claude\\cli.js", "update"],
       settlement: "close-only",
+      journalError: "redacted",
       options: expect.objectContaining({
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
