@@ -810,6 +810,23 @@ export const FIRST_RUN_RESUME_STEPS = [
 
 export type FirstRunResumeStep = (typeof FIRST_RUN_RESUME_STEPS)[number];
 
+export type ClaudeCodeUpdateStatus =
+  | 'idle' | 'blocked' | 'updating' | 'updated'
+  | 'up_to_date' | 'unavailable' | 'error';
+
+export type ClaudeCodeUpdateReason =
+  | 'active_tasks' | 'runtime_busy' | 'not_installed'
+  | 'unsupported_installation' | 'identity_changed' | 'invalid_version'
+  | 'permission_denied' | 'timed_out' | 'cleanup_unconfirmed'
+  | 'update_failed' | null;
+
+export type ClaudeCodeUpdateSnapshot = Readonly<{
+  status: ClaudeCodeUpdateStatus;
+  reason: ClaudeCodeUpdateReason;
+  beforeVersion: string | null;
+  afterVersion: string | null;
+}>;
+
 export type UpdateStatus =
   | 'idle'
   | 'disabled'
