@@ -1173,6 +1173,96 @@ async function runChild(
   })
 }
 
+async function runExactCliTailFixture(_args: string[] = []) {
+  const root = await disposableRoot('workbench-preflight-cli-tail-')
+  const scriptPath = path.join(root, 'preflight-cli-tail.mjs')
+  const tracePath = path.join(root, 'cli-trace.json')
+  const fixtureWorkspaceRoot = path.join(root, 'workspace')
+  const sourceBytes = await fs.readFile(preflightPath)
+  const tailNeedle = Buffer.from('export async function runEarlyGitPackageGate(input) {', 'utf8')
+  const tailStart = sourceBytes.indexOf(tailNeedle)
+  expect(tailStart, 'production CLI tail start').toBeGreaterThan(-1)
+  expect(sourceBytes.indexOf(tailNeedle, tailStart + 1), 'production CLI tail start must be unique').toBe(-1)
+  const tailBytes = sourceBytes.subarray(tailStart)
+  const prefixBytes = Buffer.from([
+    "import fs from 'node:fs';",
+    "import path from 'node:path';",
+    "import { fileURLToPath } from 'node:url';",
+    `const WORKSPACE_ROOT = ${JSON.stringify(fixtureWorkspaceRoot)};`,
+    `const TRACE_PATH = ${JSON.stringify(tracePath)};`,
+    "const releaseFacts = Object.freeze({ fixture: 'release-facts' });",
+    "const dependencyBootstrap = Object.freeze({ fixture: 'dependency-bootstrap' });",
+    "const preparedMetadata = Object.freeze({ fixture: 'prepared-metadata' });",
+    "const context = Object.freeze({ fixture: 'context' });",
+    'const trace = [];',
+    "function fail(message) { throw new Error(message); }",
+    "function assertExactInput(value, keys) {",
+    "  if (value === null || typeof value !== 'object' || Array.isArray(value)) fail('fixture input shape');",
+    "  const actual = Reflect.ownKeys(value);",
+    "  if (actual.length !== keys.length || actual.some((key, index) => key !== keys[index])) fail('fixture input keys');",
+    '}',
+    "function record(stage) { trace.push(stage); fs.writeFileSync(TRACE_PATH, JSON.stringify(trace) + '\\n', { encoding: 'utf8' }); }",
+    'const PRODUCTION_CORE = Object.freeze({',
+    '  async runEarlyGitPackageGate(input) {',
+    "    assertExactInput(input, ['workspaceRoot']);",
+    "    if (input.workspaceRoot !== WORKSPACE_ROOT) fail('early gate workspace identity');",
+    "    record('early-gate');",
+    '    return releaseFacts;',
+    '  },',
+    '  async prepareDependencyBootstrap(input) {',
+    "    assertExactInput(input, ['workspaceRoot', 'releaseFacts']);",
+    "    if (input.workspaceRoot !== WORKSPACE_ROOT || input.releaseFacts !== releaseFacts) fail('bootstrap identity');",
+    "    record('dependency-bootstrap');",
+    '    return dependencyBootstrap;',
+    '  },',
+    '  async prepareReleaseMetadata(input) {',
+    "    assertExactInput(input, ['workspaceRoot', 'releaseFacts', 'dependencyBootstrap']);",
+    "    if (input.workspaceRoot !== WORKSPACE_ROOT || input.releaseFacts !== releaseFacts || input.dependencyBootstrap !== dependencyBootstrap) fail('metadata identity');",
+    "    record('release-metadata');",
+    '    return preparedMetadata;',
+    '  },',
+    '  async runPreflight(input) {',
+    "    assertExactInput(input, ['context', 'dependencyBootstrap']);",
+    "    if (input.context !== context || input.dependencyBootstrap !== dependencyBootstrap) fail('preflight identity');",
+    "    record('preflight');",
+    "    return Object.freeze({ status: 'PASS' });",
+    '  },',
+    "  async loadPostInstallBindings() { fail('unexpected post-install loader'); },",
+    "  async loadBoundPreflightReport() { fail('unexpected report loader'); },",
+    "  async loadFrozenPreflightContext() { fail('unexpected frozen loader'); },",
+    '});',
+    'function createReleaseContext(input) {',
+    "  assertExactInput(input, ['workspaceRoot', 'releaseFacts', 'preparedMetadata']);",
+    "  if (input.workspaceRoot !== WORKSPACE_ROOT || input.releaseFacts !== releaseFacts || input.preparedMetadata !== preparedMetadata) fail('context identity');",
+    "  record('release-context');",
+    '  return context;',
+    '}',
+    '',
+  ].join('\n'), 'utf8')
+  await fs.writeFile(scriptPath, Buffer.concat([prefixBytes, tailBytes]), { flag: 'wx' })
+  const result = await runChild('C:\\Program Files\\nodejs\\node.exe', [scriptPath, ..._args], { cwd: root })
+  const copiedBytes = await fs.readFile(scriptPath)
+  expect(copiedBytes.subarray(prefixBytes.length).equals(tailBytes), 'copied production CLI tail bytes').toBe(true)
+  const trace = await fs.readFile(tracePath, 'utf8')
+    .then((text) => JSON.parse(text) as string[])
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return null
+      throw error
+    })
+  const exists = async (candidate: string) => await fs.stat(candidate).then(() => true).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === 'ENOENT') return false
+    throw error
+  })
+  return {
+    root,
+    result,
+    trace,
+    snapshot: await filesystemSnapshot(root),
+    workspaceExists: await exists(fixtureWorkspaceRoot),
+    releaseValidationExists: await exists(path.join(root, 'release-validation')),
+  }
+}
+
 describe('bounded child fixture harness', () => {
   it('kills a timed-out child tree and settles only after close', async () => {
     const started = Date.now()
@@ -3283,5 +3373,36 @@ describe('diagnostic entrypoint contract', () => {
     expect(result.code).not.toBe(0)
     expect(result.stdout).toBe('')
     expect(result.stderr).toBe('Release preflight failed.\n')
+  })
+
+  it('executes the exact production CLI tail with zero arguments and preserves orchestration identity', async () => {
+    const fixture = await runExactCliTailFixture()
+    expect(fixture.result).toEqual({ code: 0, stdout: 'Release preflight passed.\n', stderr: '' })
+    expect(fixture.trace).toEqual([
+      'early-gate',
+      'dependency-bootstrap',
+      'release-metadata',
+      'release-context',
+      'preflight',
+    ])
+    expect(fixture.workspaceExists).toBe(false)
+    expect(fixture.releaseValidationExists).toBe(false)
+    expect(fixture.snapshot.map((entry) => [entry.relativePath, entry.kind])).toEqual([
+      ['cli-trace.json', 'file'],
+      ['preflight-cli-tail.mjs', 'file'],
+    ])
+  })
+
+  it('rejects an exact-tail CLI option before any fixture stage or workspace write', async () => {
+    const fixture = await runExactCliTailFixture(['--freeze'])
+    expect(fixture.result.code).not.toBe(0)
+    expect(fixture.result.stdout).toBe('')
+    expect(fixture.result.stderr).toBe('Release preflight failed.\n')
+    expect(fixture.trace).toBeNull()
+    expect(fixture.workspaceExists).toBe(false)
+    expect(fixture.releaseValidationExists).toBe(false)
+    expect(fixture.snapshot.map((entry) => [entry.relativePath, entry.kind])).toEqual([
+      ['preflight-cli-tail.mjs', 'file'],
+    ])
   })
 })
