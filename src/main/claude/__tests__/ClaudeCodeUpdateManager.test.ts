@@ -176,29 +176,31 @@ describe("ClaudeCodeUpdateManager", () => {
     expect(Object.isFrozen(test.manager.getSnapshot())).toBe(true);
     expect(test.manager.isUpdating()).toBe(false);
     expect(test.operations).toEqual([]);
-    expect(test.isFakeRuntime).not.toHaveBeenCalled();
+    expect(test.isFakeRuntime).toHaveBeenCalledOnce();
   });
 
-  it("returns unavailable for a fake runtime before touching the gate or resolver", async () => {
+  it("constructs a fake runtime as frozen unavailable before touching the gate, resolver, or runner", async () => {
     const test = managerHarness({ fakeRuntime: true });
     const ordinary = test.runtimeGate.tryAcquireOrdinary();
+    const initial = test.manager.getSnapshot();
 
-    expect(test.manager.getSnapshot()).toEqual(IDLE);
-    expect(test.isFakeRuntime).not.toHaveBeenCalled();
-    await expect(test.manager.updateNow()).resolves.toEqual(
-      Object.freeze({
-        status: "unavailable",
-        reason: "unsupported_installation",
-        beforeVersion: null,
-        afterVersion: null,
-      }),
-    );
+    expect(initial).toEqual({
+      status: "unavailable",
+      reason: "unsupported_installation",
+      beforeVersion: null,
+      afterVersion: null,
+    });
+    expect(Object.isFrozen(initial)).toBe(true);
+    expect(test.manager.getSnapshot()).toBe(initial);
     expect(test.isFakeRuntime).toHaveBeenCalledOnce();
     expect(test.operations).toEqual([]);
     expect(test.runtimeGate.snapshot()).toEqual({
       ordinaryLeaseCount: 1,
       updateActive: false,
     });
+    await expect(test.manager.updateNow()).resolves.toBe(initial);
+    expect(test.isFakeRuntime).toHaveBeenCalledOnce();
+    expect(test.operations).toEqual([]);
     ordinary?.release();
   });
 

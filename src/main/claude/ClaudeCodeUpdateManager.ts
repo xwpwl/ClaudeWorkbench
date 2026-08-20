@@ -440,12 +440,14 @@ export class SupervisedClaudeUpdateCommandRunner implements ClaudeUpdateCommandR
 
 export class ClaudeCodeUpdateManager {
   private snapshot: ClaudeCodeUpdateSnapshot;
+  private readonly fakeRuntime: boolean;
   private inFlight: Promise<ClaudeCodeUpdateSnapshot> | null = null;
   private retainedLease: ClaudeRuntimeLease | null = null;
   private disposeInFlight: Promise<void> | null = null;
 
   constructor(private readonly options: ClaudeCodeUpdateManagerOptions) {
-    this.snapshot = IDLE_SNAPSHOT;
+    this.fakeRuntime = this.fakeRuntimeSelected();
+    this.snapshot = this.fakeRuntime ? FAKE_RUNTIME_SNAPSHOT : IDLE_SNAPSHOT;
   }
 
   getSnapshot(): ClaudeCodeUpdateSnapshot {
@@ -455,7 +457,7 @@ export class ClaudeCodeUpdateManager {
   updateNow(): Promise<ClaudeCodeUpdateSnapshot> {
     if (this.inFlight) return this.inFlight;
     if (this.retainedLease) return Promise.resolve(this.snapshot);
-    if (this.fakeRuntimeSelected()) {
+    if (this.fakeRuntime) {
       this.snapshot = FAKE_RUNTIME_SNAPSHOT;
       this.emitLog("blocked", "unsupported_installation");
       return Promise.resolve(this.snapshot);
