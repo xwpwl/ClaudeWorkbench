@@ -293,7 +293,7 @@ export class ClaudeInvocationResolver implements ClaudeInvocationResolverPort {
     if (extension === ".exe" || extension === ".com") {
       return this.resolveNative(normalizedDisplayPath);
     }
-    if (extension === ".cmd" || extension === ".ps1") {
+    if (extension === "" || extension === ".cmd" || extension === ".ps1") {
       return this.resolveNpm(normalizedDisplayPath);
     }
     return { kind: "unsupported" };

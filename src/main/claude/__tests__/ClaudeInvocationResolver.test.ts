@@ -297,6 +297,120 @@ describe("ClaudeInvocationResolver", () => {
     expect(test.touched.lstat.filter((filePath) => filePath === shim)).toHaveLength(2);
   });
 
+  it("resolves a validated extensionless npm shim selected before a later cmd shim", () => {
+    const shim = "C:\\npm\\claude";
+    const laterShim = "C:\\npm\\claude.cmd";
+    const cli = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js";
+    const test = resolverHarness({
+      located: [shim, laterShim],
+      files: {
+        [shim]: ordinaryFile(),
+        [laterShim]: ordinaryFile(),
+        [cli]: ordinaryFile(),
+      },
+    });
+
+    expect(test.resolver.resolve()).toEqual({
+      ok: true,
+      invocation: {
+        executable: "C:\\Workbench\\electron.exe",
+        prefixArgs: [cli],
+        environmentPatch: { ELECTRON_RUN_AS_NODE: "1" },
+        displayPath: shim,
+        canonicalTargetPath: cli,
+        provenance: "npm",
+      },
+    });
+    expect(test.touched.lstat.filter((filePath) => filePath === shim)).toHaveLength(2);
+    expect(test.touched.lstat).not.toContain(laterShim);
+  });
+
+  it("fails closed on a missing extensionless npm shim without inspecting a later candidate", () => {
+    const shim = "C:\\npm\\claude";
+    const laterShim = "C:\\npm\\claude.cmd";
+    const cli = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js";
+    const test = resolverHarness({
+      located: [shim, laterShim],
+      files: { [laterShim]: ordinaryFile(), [cli]: ordinaryFile() },
+    });
+
+    expect(test.resolver.resolve()).toEqual({
+      ok: false,
+      reason: "unsupported_installation",
+    });
+    expect(test.touched.lstat.filter((filePath) => filePath === shim)).toHaveLength(1);
+    expect(test.touched.lstat).not.toContain(laterShim);
+  });
+
+  it("rejects a selected extensionless npm shim that is a symbolic link", () => {
+    const shim = "C:\\npm\\claude";
+    const cli = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js";
+    const test = resolverHarness({
+      located: [shim],
+      files: {
+        [shim]: ordinaryFile({ symbolicLink: true }),
+        [cli]: ordinaryFile(),
+      },
+    });
+
+    expect(test.resolver.resolve()).toEqual({
+      ok: false,
+      reason: "unsupported_installation",
+    });
+    expect(test.touched.lstat.filter((filePath) => filePath === shim)).toHaveLength(1);
+  });
+
+  it("rejects a selected extensionless npm shim whose identity changes", () => {
+    const shim = "C:\\npm\\claude";
+    const cli = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js";
+    const test = resolverHarness({
+      located: [shim],
+      files: {
+        [shim]: [ordinaryFile({ ino: 1 }), ordinaryFile({ ino: 2 })],
+        [cli]: ordinaryFile(),
+      },
+    });
+
+    expect(test.resolver.resolve()).toEqual({
+      ok: false,
+      reason: "unsupported_installation",
+    });
+    expect(test.touched.lstat.filter((filePath) => filePath === shim)).toHaveLength(2);
+  });
+
+  it("rejects a selected extensionless npm shim whose realpath changes", () => {
+    const shim = "C:\\npm\\claude";
+    const cli = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js";
+    const test = resolverHarness({
+      located: [shim],
+      files: { [shim]: ordinaryFile(), [cli]: ordinaryFile() },
+      realpaths: { [shim]: [shim, "C:\\redirected\\claude"] },
+    });
+
+    expect(test.resolver.resolve()).toEqual({
+      ok: false,
+      reason: "unsupported_installation",
+    });
+    expect(test.touched.realpath.filter((filePath) => filePath === shim)).toHaveLength(2);
+  });
+
+  it("rejects a selected extensionless npm shim whose locator case is not canonical", () => {
+    const shim = "C:\\npm\\claude";
+    const canonicalShim = "C:\\npm\\Claude";
+    const cli = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js";
+    const test = resolverHarness({
+      located: [shim],
+      files: { [canonicalShim]: ordinaryFile(), [cli]: ordinaryFile() },
+      realpaths: { [shim]: canonicalShim },
+    });
+
+    expect(test.resolver.resolve()).toEqual({
+      ok: false,
+      reason: "unsupported_installation",
+    });
+    expect(test.touched.lstat.filter((filePath) => filePath === shim)).toHaveLength(2);
+  });
+
   it("rejects a missing selected npm shim even when its package and cli remain", () => {
     const cli = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js";
     const test = resolverHarness({
