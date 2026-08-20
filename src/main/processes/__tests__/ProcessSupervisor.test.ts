@@ -177,6 +177,37 @@ describe('ProcessSupervisor', () => {
     expect(Object.isFrozen(await first)).toBe(true);
   });
 
+  it('retains opted-in error observation and termination ownership until close', async () => {
+    vi.useFakeTimers();
+    try {
+      const test = harness({ platform: 'linux' });
+      const handle = await test.supervisor.spawn({
+        id: 'close-owned-error',
+        kind: 'claude',
+        command: 'claude-test',
+        confirmCloseOwnership: true,
+      });
+      const child = test.children[0];
+      child.kill.mockImplementation((signal) => {
+        if (signal === 'SIGKILL') queueMicrotask(() => child.emit('close', null, 'SIGKILL'));
+        return true;
+      });
+
+      child.emit('error', new Error('first-error'));
+      await expect(handle.waitForExit()).resolves.toMatchObject({ error: 'first-error' });
+      expect(() => child.emit('error', new Error('second-error'))).not.toThrow();
+
+      const termination = handle.terminate({ graceMs: 0, forceMs: 25 });
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(termination).resolves.toMatchObject({ error: 'first-error' });
+      await expect(handle.waitForClose()).resolves.toEqual({ exitCode: null, signal: 'SIGKILL' });
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL']);
+      expect(child.listenerCount('error')).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('transfers opted-in start-journal cleanup when close is unconfirmed', async () => {
     vi.useFakeTimers();
     try {

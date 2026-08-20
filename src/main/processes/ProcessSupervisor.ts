@@ -273,7 +273,7 @@ export class ProcessSupervisor {
       shell: false,
     });
     const rawClose = settlement === 'close-only' || request.confirmCloseOwnership === true
-      ? observeRawClose(child, !child.pid)
+      ? observeRawClose(child, !child.pid || request.confirmCloseOwnership === true)
       : undefined;
     if (!child.pid) {
       // Node reports asynchronous spawn failures through `error`; keep that
@@ -380,11 +380,28 @@ export class ProcessSupervisor {
     active: ActiveProcess,
     options: ProcessTerminationOptions,
   ): Promise<ProcessExitRecord> {
-    if (active.terminal) return active.terminal;
+    if (active.terminal && (!active.closeOwnership || active.closeOwnership.isClosed())) {
+      return active.terminal;
+    }
 
     const graceMs = boundedDelay(options.graceMs, this.defaultGraceMs);
     const forceMs = boundedDelay(options.forceMs, this.defaultForceMs);
     const signalled = active.child.kill('SIGTERM');
+    if (active.closeOwnership) {
+      if (await active.closeOwnership.wait(graceMs)) return active.exit;
+      if (!signalled) {
+        throw new Error(`Managed process could not be signalled safely: ${active.start.id}`);
+      }
+      if (this.platform === 'win32') {
+        await this.taskkill(active.start.pid, true, forceMs);
+      } else {
+        active.child.kill('SIGKILL');
+      }
+      if (!await active.closeOwnership.wait(forceMs)) {
+        throw new Error(`Managed process did not exit after force termination: ${active.start.id}`);
+      }
+      return active.exit;
+    }
     const graceful = await Promise.race([active.exit, wait(graceMs)]);
     if (graceful !== 'timeout') return graceful;
     if (!signalled) {

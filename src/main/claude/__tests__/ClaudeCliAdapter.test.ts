@@ -399,6 +399,28 @@ describe('ClaudeCliAdapter', () => {
     await vi.waitFor(() => expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0));
   });
 
+  it('stopAll still signals and waits for close after a default-settlement process error', async () => {
+    const harness = createHarness({ terminationGraceMs: 1, terminationForceMs: 1 });
+    await harness.adapter.runPrompt(runOptions());
+    const child = harness.calls[0].child;
+    vi.mocked(child.kill).mockImplementation(() => true);
+
+    child.emit('error', new Error('early-managed-error'));
+    await Promise.resolve();
+    const stopping = harness.adapter.stopAll();
+    await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith('SIGTERM'));
+
+    let settled = false;
+    void stopping.then(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(1);
+
+    child.emit('close', null, 'SIGTERM');
+    await expect(stopping).resolves.toBeUndefined();
+    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0);
+  });
+
   it('applies the resolver environment patch after provider and task environment', async () => {
     const providerEnvironment: ProviderEnvironmentPort = {
       resolveChildEnvironment: vi.fn((_options, inherited) => ({
