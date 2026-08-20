@@ -236,11 +236,51 @@ describe("ClaudeInvocationResolver", () => {
     expect(test.locateCalls()).toBe(1);
   });
 
+  it("accepts a drive-local candidate written with forward slashes", () => {
+    const test = resolverHarness({
+      located: ["C:/native/claude.exe"],
+      files: { "C:\\native\\claude.exe": ordinaryFile() },
+    });
+
+    expect(test.resolver.resolve()).toEqual({
+      ok: true,
+      invocation: expect.objectContaining({
+        canonicalTargetPath: "C:\\native\\claude.exe",
+      }),
+    });
+  });
+
+  it.each([
+    ["UNC", "\\\\server\\share\\claude.exe"],
+    ["forward-slash UNC", "//server/share/claude.exe"],
+    ["device drive", "\\\\?\\C:\\native\\claude.exe"],
+    ["device UNC", "\\\\?\\UNC\\server\\share\\claude.exe"],
+    ["DOS device", "\\\\.\\C:\\native\\claude.exe"],
+    ["backslash-rooted", "\\claude.exe"],
+    ["slash-rooted", "/claude.exe"],
+    ["backslash root", "\\"],
+    ["slash root", "/"],
+  ])(
+    "rejects a Windows %s path before touching the filesystem",
+    (_label, candidate) => {
+      const test = resolverHarness({ located: [candidate] });
+
+      expect(test.resolver.resolve()).toEqual({
+        ok: false,
+        reason: "unsupported_installation",
+      });
+      expect(test.touched.lstat).toEqual([]);
+      expect(test.touched.realpath).toEqual([]);
+      expect(test.touched.readdir).toEqual([]);
+    },
+  );
+
   it("runs an npm target through Electron-as-Node without executing its cmd shim", () => {
+    const shim = "C:\\npm\\claude.cmd";
     const cli = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js";
     const test = resolverHarness({
-      located: ["C:\\npm\\claude.cmd"],
-      files: { [cli]: ordinaryFile() },
+      located: [shim],
+      files: { [shim]: ordinaryFile(), [cli]: ordinaryFile() },
     });
 
     expect(test.resolver.resolve()).toEqual({
@@ -254,7 +294,85 @@ describe("ClaudeInvocationResolver", () => {
         provenance: "npm",
       },
     });
-    expect(test.touched.lstat).not.toContain("C:\\npm\\claude.cmd");
+    expect(test.touched.lstat.filter((filePath) => filePath === shim)).toHaveLength(2);
+  });
+
+  it("rejects a missing selected npm shim even when its package and cli remain", () => {
+    const cli = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js";
+    const test = resolverHarness({
+      located: ["C:\\npm\\claude.cmd"],
+      files: { [cli]: ordinaryFile() },
+    });
+
+    expect(test.resolver.resolve()).toEqual({
+      ok: false,
+      reason: "unsupported_installation",
+    });
+  });
+
+  it.each([
+    ["directory", ordinaryFile({ file: false })],
+    ["symbolic link", ordinaryFile({ symbolicLink: true })],
+  ])("rejects a selected npm shim that is a %s", (_label, facts) => {
+    const shim = "C:\\npm\\claude.cmd";
+    const cli = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js";
+    const test = resolverHarness({
+      located: [shim],
+      files: { [shim]: facts, [cli]: ordinaryFile() },
+    });
+
+    expect(test.resolver.resolve()).toEqual({
+      ok: false,
+      reason: "unsupported_installation",
+    });
+  });
+
+  it("rejects a selected npm shim whose identity changes", () => {
+    const shim = "C:\\npm\\claude.cmd";
+    const cli = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js";
+    const test = resolverHarness({
+      located: [shim],
+      files: {
+        [shim]: [ordinaryFile({ ino: 1 }), ordinaryFile({ ino: 2 })],
+        [cli]: ordinaryFile(),
+      },
+    });
+
+    expect(test.resolver.resolve()).toEqual({
+      ok: false,
+      reason: "unsupported_installation",
+    });
+  });
+
+  it("rejects a selected npm shim whose realpath changes", () => {
+    const shim = "C:\\npm\\claude.cmd";
+    const cli = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js";
+    const test = resolverHarness({
+      located: [shim],
+      files: { [shim]: ordinaryFile(), [cli]: ordinaryFile() },
+      realpaths: { [shim]: [shim, "C:\\redirected\\claude.cmd"] },
+    });
+
+    expect(test.resolver.resolve()).toEqual({
+      ok: false,
+      reason: "unsupported_installation",
+    });
+  });
+
+  it("rejects a selected npm shim whose locator spelling is not canonical case", () => {
+    const shim = "C:\\npm\\claude.cmd";
+    const canonicalShim = "C:\\npm\\Claude.cmd";
+    const cli = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js";
+    const test = resolverHarness({
+      located: [shim],
+      files: { [canonicalShim]: ordinaryFile(), [cli]: ordinaryFile() },
+      realpaths: { [shim]: canonicalShim },
+    });
+
+    expect(test.resolver.resolve()).toEqual({
+      ok: false,
+      reason: "unsupported_installation",
+    });
   });
 
   it("does not let a later native binary overtake the first npm shim", () => {
@@ -262,6 +380,7 @@ describe("ClaudeInvocationResolver", () => {
     const test = resolverHarness({
       located: ["C:\\npm\\claude.cmd", "C:\\native\\claude.exe"],
       files: {
+        "C:\\npm\\claude.cmd": ordinaryFile(),
         [cli]: ordinaryFile(),
         "C:\\native\\claude.exe": ordinaryFile(),
       },
@@ -373,6 +492,7 @@ describe("ClaudeInvocationResolver", () => {
   });
 
   it("uses the fixed npm fallback after absent native fallbacks", () => {
+    const shim = "C:\\Users\\Ada\\AppData\\Roaming\\npm\\claude.cmd";
     const cli =
       "C:\\Users\\Ada\\AppData\\Roaming\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js";
     const test = resolverHarness({
@@ -382,7 +502,7 @@ describe("ClaudeInvocationResolver", () => {
         USERPROFILE: "C:\\Users\\Ada",
         APPDATA: "C:\\Users\\Ada\\AppData\\Roaming",
       },
-      files: { [cli]: ordinaryFile() },
+      files: { [shim]: ordinaryFile(), [cli]: ordinaryFile() },
     });
 
     expect(test.resolver.resolve()).toEqual({
@@ -513,10 +633,11 @@ describe("ClaudeInvocationResolver", () => {
   });
 
   it("rejects an npm cli target that escapes its canonical package root", () => {
+    const shim = "C:\\npm\\claude.cmd";
     const cli = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js";
     const test = resolverHarness({
-      located: ["C:\\npm\\claude.cmd"],
-      files: { [cli]: ordinaryFile() },
+      located: [shim],
+      files: { [shim]: ordinaryFile(), [cli]: ordinaryFile() },
       realpaths: { [cli]: "C:\\outside\\cli.js" },
     });
 
@@ -527,11 +648,13 @@ describe("ClaudeInvocationResolver", () => {
   });
 
   it("rejects an npm package root whose identity changes across composite observations", () => {
+    const shim = "C:\\npm\\claude.cmd";
     const packageRoot = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code";
     const cli = `${packageRoot}\\cli.js`;
     const test = resolverHarness({
-      located: ["C:\\npm\\claude.cmd"],
+      located: [shim],
       files: {
+        [shim]: ordinaryFile(),
         [packageRoot]: [
           ordinaryFile({ file: false, ino: 10 }),
           ordinaryFile({ file: false, ino: 11 }),
@@ -547,12 +670,14 @@ describe("ClaudeInvocationResolver", () => {
   });
 
   it("rejects coordinated package and cli movement between composite observations", () => {
+    const shim = "C:\\npm\\claude.cmd";
     const packageRoot = "C:\\npm\\node_modules\\@anthropic-ai\\claude-code";
     const cli = `${packageRoot}\\cli.js`;
     let moved = false;
     const test = resolverHarness({
-      located: ["C:\\npm\\claude.cmd"],
+      located: [shim],
       files: {
+        [shim]: ordinaryFile(),
         [packageRoot]: ordinaryFile({ file: false, ino: 20 }),
         [cli]: ordinaryFile({ ino: 21 }),
       },
@@ -611,6 +736,7 @@ describe("ClaudeInvocationResolver", () => {
     const success = resolverHarness({
       located: ["C:\\npm\\claude.cmd"],
       files: {
+        "C:\\npm\\claude.cmd": ordinaryFile(),
         "C:\\npm\\node_modules\\@anthropic-ai\\claude-code\\cli.js":
           ordinaryFile(),
       },

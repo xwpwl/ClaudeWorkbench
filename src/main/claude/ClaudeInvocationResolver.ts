@@ -303,7 +303,10 @@ export class ClaudeInvocationResolver implements ClaudeInvocationResolverPort {
     const observed = this.observeOrdinaryFile(displayPath);
     if (observed.kind !== "observed") return observed;
     const { observation } = observed;
-    if (!this.isCanonicalCase(observation.canonicalPath))
+    if (
+      !this.hasCanonicalSpelling(displayPath, observation.canonicalPath) ||
+      !this.isCanonicalCase(observation.canonicalPath)
+    )
       return { kind: "unsupported" };
     if (this.isForbidden(displayPath, displayPath, observation.canonicalPath)) {
       return { kind: "unsupported" };
@@ -330,13 +333,16 @@ export class ClaudeInvocationResolver implements ClaudeInvocationResolverPort {
       "claude-code",
     );
     const cliPath = this.pathApi.join(packageRoot, "cli.js");
-    const first = this.observeNpmComposite(packageRoot, cliPath);
+    const first = this.observeNpmComposite(displayPath, packageRoot, cliPath);
     if (first.kind !== "observed") return first;
-    const second = this.observeNpmComposite(packageRoot, cliPath);
+    const second = this.observeNpmComposite(displayPath, packageRoot, cliPath);
     if (second.kind !== "observed") return second;
     if (
+      !sameFileObservation(first.shim, second.shim) ||
       !sameFileObservation(first.packageRoot, second.packageRoot) ||
       !sameFileObservation(first.cli, second.cli) ||
+      !this.hasCanonicalSpelling(displayPath, first.shim.canonicalPath) ||
+      !this.isCanonicalCase(first.shim.canonicalPath) ||
       !this.isCanonicalCase(first.cli.canonicalPath) ||
       !this.isCanonicalCase(second.cli.canonicalPath) ||
       !this.isExactOrDescendant(
@@ -347,6 +353,7 @@ export class ClaudeInvocationResolver implements ClaudeInvocationResolverPort {
         second.packageRoot.canonicalPath,
         second.cli.canonicalPath,
       ) ||
+      this.isForbidden(displayPath, displayPath, first.shim.canonicalPath) ||
       this.isForbidden(displayPath, cliPath, first.cli.canonicalPath)
     ) {
       return { kind: "unsupported" };
@@ -366,22 +373,27 @@ export class ClaudeInvocationResolver implements ClaudeInvocationResolverPort {
   }
 
   private observeNpmComposite(
+    shimPath: string,
     packageRoot: string,
     cliPath: string,
   ):
     | {
         readonly kind: "observed";
+        readonly shim: FileObservation;
         readonly packageRoot: FileObservation;
         readonly cli: FileObservation;
       }
     | { readonly kind: "missing" }
     | { readonly kind: "unsupported" } {
+    const shim = this.observePath(shimPath, "file");
+    if (shim.kind !== "observed") return shim;
     const root = this.observePath(packageRoot, "directory");
     if (root.kind !== "observed") return root;
     const cli = this.observePath(cliPath, "file");
     if (cli.kind !== "observed") return cli;
     return {
       kind: "observed",
+      shim: shim.observation,
       packageRoot: root.observation,
       cli: cli.observation,
     };
@@ -511,10 +523,19 @@ export class ClaudeInvocationResolver implements ClaudeInvocationResolverPort {
   }
 
   private isSafeAbsolutePath(filePath: string): boolean {
+    if (!filePath || filePath.includes("\0")) return false;
+    if (this.platform === "win32") return /^[A-Za-z]:[\\/]/u.test(filePath);
+    return this.pathApi.isAbsolute(filePath);
+  }
+
+  private hasCanonicalSpelling(
+    displayPath: string,
+    canonicalPath: string,
+  ): boolean {
     return (
-      Boolean(filePath) &&
-      !filePath.includes("\0") &&
-      this.pathApi.isAbsolute(filePath)
+      this.platform !== "win32" ||
+      this.pathApi.normalize(displayPath) ===
+        this.pathApi.normalize(canonicalPath)
     );
   }
 
