@@ -6,7 +6,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { isProxy } from 'node:util/types'
 import vm from 'node:vm'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { PreflightReportSchema } from '../../scripts/release/lib/report-schema.mjs'
 
 const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -3297,15 +3297,40 @@ describe('bindings and frozen consumers', () => {
     expect([state.clockReads, state.environmentReads]).toEqual([clockReadsBefore, environmentReadsBefore])
   })
 
-  it('loads a bound report only for the fixed item, path, exact hash, context, and fresh binding lease', async () => {
-    const state = newState()
-    const deps = makeDeps(state)
-    const core = await extractedCore(deps)
-    const { context, report, preflightReference } = await completedPreflight(core, state)
-    const loaded = await core.loadBoundPreflightReport({ workspaceRoot, context, preflightReference })
-    expect(loaded).toEqual({ report, bindings: await expectedBindingsForState(state) })
-    await expect(core.loadBoundPreflightReport({ workspaceRoot, context, preflightReference: exactReference('0'.repeat(64)) })).rejects.toThrow()
-    await expect(core.loadBoundPreflightReport({ workspaceRoot, context, preflightReference: { ...preflightReference, itemId: 'FORGED' } })).rejects.toThrow()
+  describe('bound report loader', () => {
+    let state!: TestState
+    let core!: Awaited<ReturnType<typeof extractedCore>>
+    let context!: ReturnType<typeof expectedContext>
+    let report!: ReturnType<typeof publishedReport>
+    let preflightReference!: ReturnType<typeof exactReference>
+
+    beforeAll(async () => {
+      state = newState()
+      core = await extractedCore(makeDeps(state))
+      const completed = await completedPreflight(core, state)
+      context = completed.context
+      report = completed.report
+      preflightReference = completed.preflightReference
+    })
+
+    it('loads a bound report only for the fixed item, path, exact hash, context, and fresh binding lease', async () => {
+      const loaded = await core.loadBoundPreflightReport({ workspaceRoot, context, preflightReference })
+      expect(loaded).toEqual({ report, bindings: await expectedBindingsForState(state) })
+    })
+
+    it('rejects a bound report reference with the wrong exact hash', async () => {
+      await expect(core.loadBoundPreflightReport({
+        workspaceRoot, context, preflightReference: exactReference('0'.repeat(64)),
+      })).rejects.toThrow('Bound preflight report hash drifted.')
+    })
+
+    it('rejects a bound report reference with a forged item id before the lease', async () => {
+      const capabilitiesBefore = [...state.capabilityCalls]
+      await expect(core.loadBoundPreflightReport({
+        workspaceRoot, context, preflightReference: { ...preflightReference, itemId: 'FORGED' },
+      })).rejects.toThrow('Preflight reference is invalid.')
+      expect(state.capabilityCalls).toEqual(capabilitiesBefore)
+    })
   })
 
   it('serializes the independent canonical tree fixture with fixed key order and LF hash oracle', async () => {
