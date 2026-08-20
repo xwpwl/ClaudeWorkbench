@@ -293,6 +293,33 @@ describe('preload release API', () => {
   });
 });
 
+describe('preload Claude Code update API', () => {
+  it('exposes only zero-argument Claude update calls', async () => {
+    const api = exposedApi();
+
+    await api.getClaudeCodeUpdateState();
+    await (api.updateClaudeCodeNow as unknown as (argument: unknown) => Promise<unknown>)({
+      confirmation: true,
+      path: 'C:\\forged-path',
+      argv: ['--forged'],
+      env: { FORGED: 'true' },
+      version: 'forged',
+      url: 'https://forged.invalid',
+    });
+
+    expect(electronMocks.invoke).toHaveBeenNthCalledWith(
+      1,
+      IPC_CHANNELS.CLAUDE_CODE_UPDATE_GET_STATE,
+    );
+    expect(electronMocks.invoke).toHaveBeenNthCalledWith(
+      2,
+      IPC_CHANNELS.CLAUDE_CODE_UPDATE_NOW,
+    );
+    expect(api).not.toHaveProperty('invoke');
+    expect(api).not.toHaveProperty('updateClaudeCode');
+  });
+});
+
 describe('preload Session create API', () => {
   it('omits the optional argument entirely when no Session options were provided', async () => {
     const api = exposedApi();

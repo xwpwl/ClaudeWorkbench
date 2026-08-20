@@ -84,7 +84,7 @@ describe('Renderer Main-World public API facade', () => {
     const transport = exactTransport();
     const api = createMainWorldPublicApi(transport);
 
-    expect(API_METHODS).toHaveLength(143);
+    expect(API_METHODS).toHaveLength(145);
     expect(Reflect.ownKeys(api)).toStrictEqual(API_METHODS);
     expect(Object.isFrozen(api)).toBe(true);
     expect(api.getFirstRunCompletedVersion).toBe(api.getFirstRunCompletedVersion);

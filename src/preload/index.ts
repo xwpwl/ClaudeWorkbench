@@ -11,6 +11,7 @@ import type {
   EnvironmentCheckResult,
   ConnectionStatus,
   ClaudeTestResult,
+  ClaudeCodeUpdateSnapshot,
   DiagnosticsInfo,
   ModelProviderChangedEvent,
   RendererClaudeRunOptions,
@@ -699,6 +700,10 @@ const api: ClaudeWorkbenchAPI = {
   installUpdate: (confirmed: boolean) => confirmed
     ? ipcRenderer.invoke(IPC_CHANNELS.RELEASE_INSTALL_UPDATE, { confirmed: true })
     : Promise.resolve(false),
+  getClaudeCodeUpdateState: (): Promise<ClaudeCodeUpdateSnapshot> =>
+    ipcRenderer.invoke(IPC_CHANNELS.CLAUDE_CODE_UPDATE_GET_STATE),
+  updateClaudeCodeNow: (): Promise<ClaudeCodeUpdateSnapshot> =>
+    ipcRenderer.invoke(IPC_CHANNELS.CLAUDE_CODE_UPDATE_NOW),
 
   // System
   checkEnvironment: (): Promise<EnvironmentCheckResult> =>
