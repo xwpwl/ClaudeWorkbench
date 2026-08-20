@@ -7,8 +7,16 @@ import path from 'path';
 import { pathToFileURL } from 'node:url';
 import { AppDatabase } from './database/Database';
 import { ClaudeCliAdapter, selectStartupClaudeAdapter } from './claude/ClaudeCliAdapter';
+import {
+  ClaudeCodeUpdateManager,
+  SupervisedClaudeUpdateCommandRunner,
+} from './claude/ClaudeCodeUpdateManager';
+import { ClaudeInvocationResolver } from './claude/ClaudeInvocationResolver';
 import { ClaudeLocalSessionAdapter } from './claude/ClaudeLocalSessionAdapter';
 import { FakeClaudeAdapter } from './claude/FakeClaudeAdapter';
+import { ClaudeRuntimeMutationGate } from './claude/ClaudeRuntimeMutationGate';
+import { registerClaudeRuntimeTaskGuard } from './claude/ClaudeRuntimeTaskGuard';
+import { registerClaudeUpdatesIPC } from './ipc/claude-updates';
 import { registerClaudeIPC } from './ipc/claude';
 import { registerFileChangesIPC } from './ipc/file-changes';
 import { registerHistoryIPC } from './ipc/history';
@@ -95,6 +103,7 @@ let unsubscribePermissionRequests: (() => void) | null = null;
 let unsubscribeTaskEvents: (() => void) | null = null;
 let unsubscribeTaskPermissions: (() => void) | null = null;
 let unsubscribeTaskStarts: (() => void) | null = null;
+let unsubscribeClaudeRuntimeTaskGuard: (() => void) | null = null;
 let unsubscribeCheckpointStarts: (() => void) | null = null;
 let unsubscribeCheckpointEvents: (() => void) | null = null;
 let unsubscribeCheckpointFinalizers: (() => void) | null = null;
@@ -104,8 +113,10 @@ let unsubscribeRecoveryIPC: (() => void) | null = null;
 let unsubscribeReleaseIPC: (() => void) | null = null;
 let unsubscribeDiagnosticsIPC: (() => void) | null = null;
 let unsubscribeModelProviderIPC: (() => void) | null = null;
+let disposeClaudeUpdatesIPC: (() => void) | null = null;
 let permissionBroker: PermissionBroker | null = null;
 let taskManager: TaskManager | null = null;
+let claudeCodeUpdateManager: ClaudeCodeUpdateManager | null = null;
 let checkpointManager: CheckpointManager | null = null;
 let workflowManager: AgentWorkflowManager | null = null;
 let workflowInfrastructure: WorkflowInfrastructure | null = null;
@@ -421,14 +432,21 @@ async function initializeServices(): Promise<void> {
     credentialStore,
     providerEnvironmentResolver,
   );
+  const forceFake = process.env.FORCE_FAKE === '1';
+  const claudeRuntimeGate = new ClaudeRuntimeMutationGate();
+  const claudeInvocationResolver = new ClaudeInvocationResolver({
+    untrustedRoots: [app.getAppPath()],
+  });
   const realAdapter = new ClaudeCliAdapter({
     permissionBroker,
     permissionMcpPath: path.join(__dirname, 'permission-mcp.js'),
     processSupervisor,
     providerEnvironment: providerExecutionEnvironment,
+    invocationResolver: claudeInvocationResolver,
+    runtimeGate: claudeRuntimeGate,
   });
   const baseAdapter: ClaudeAdapter = await selectStartupClaudeAdapter({
-    forceFake: process.env.FORCE_FAKE === '1',
+    forceFake,
     realAdapter,
     createFakeAdapter: () => new FakeClaudeAdapter(),
   });
@@ -534,6 +552,19 @@ async function initializeServices(): Promise<void> {
     prepareRun: (options) => modelRunOptionsResolver.revalidateResolved(options),
   });
   claudeAdapter = taskManager;
+  unsubscribeClaudeRuntimeTaskGuard = registerClaudeRuntimeTaskGuard(taskManager, claudeRuntimeGate);
+  const claudeUpdateRunner = new SupervisedClaudeUpdateCommandRunner(processSupervisor, process.env);
+  claudeCodeUpdateManager = new ClaudeCodeUpdateManager({
+    resolver: claudeInvocationResolver,
+    runtimeGate: claudeRuntimeGate,
+    runner: claudeUpdateRunner,
+    hasActiveTasks: () => (taskManager?.getActiveTasks().length ?? 0) > 0,
+    isFakeRuntime: () => forceFake,
+    log: (stage, reason) => structuredLogger?.info('app', 'claude_update.state', {
+      stage,
+      reason,
+    }),
+  });
   checkpointManager = new CheckpointManager(db, path.join(dataRoot, 'checkpoints'), {
     mutations: fileMutations,
   });
@@ -648,6 +679,10 @@ async function initializeServices(): Promise<void> {
     getTrustedWebContents: () => mainWindow?.webContents ?? null,
     getTrustedFrameUrl: trustedRendererUrl,
   };
+  disposeClaudeUpdatesIPC = registerClaudeUpdatesIPC(publicIpcMain, {
+    updates: claudeCodeUpdateManager,
+    ...trustedRenderer,
+  });
   registerProjectIPC(publicIpcMain, db, { firstRunService, ...trustedRenderer });
   registerSessionIPC(publicIpcMain, db, historyAdapter, {
     validateExecutableModel: async ({ projectId, fallbackModelId }) => {
@@ -692,6 +727,10 @@ async function initializeServices(): Promise<void> {
     getTrustedFrameUrl: trustedRendererUrl,
   });
   registerSystemIPC(publicIpcMain, {
+    claudeRuntime: {
+      resolver: claudeInvocationResolver,
+      gate: claudeRuntimeGate,
+    },
     allowedPaths: () => [
       dataRoot,
       ...(db?.listProjects().map((project) => project.path) ?? []),
@@ -803,6 +842,8 @@ async function initializeServices(): Promise<void> {
 
   shutdownCoordinator = new ShutdownCoordinator({
     stopAcceptingWork: () => {
+      disposeClaudeUpdatesIPC?.();
+      disposeClaudeUpdatesIPC = null;
       for (const channel of Object.values(IPC_CHANNELS)) ipcMain.removeHandler(channel);
       unsubscribeClaudeEvents?.();
       unsubscribeClaudeEvents = null;
@@ -824,6 +865,10 @@ async function initializeServices(): Promise<void> {
     closePermissions: async () => permissionBroker?.close(),
     stopTasks: async () => {
       await taskManager?.stopAll();
+      await claudeCodeUpdateManager?.dispose();
+      unsubscribeClaudeRuntimeTaskGuard?.();
+      unsubscribeClaudeRuntimeTaskGuard = null;
+      claudeCodeUpdateManager = null;
       unsubscribeTaskEvents?.();
       unsubscribeTaskEvents = null;
       unsubscribeTaskPermissions?.();
