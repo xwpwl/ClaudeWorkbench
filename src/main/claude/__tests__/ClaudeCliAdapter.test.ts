@@ -13,9 +13,11 @@ import type {
 } from '../ClaudeInvocationResolver';
 import { ClaudeRuntimeMutationGate } from '../ClaudeRuntimeMutationGate';
 import {
-  ManagedProcessCleanupUnconfirmedError,
   ProcessSupervisor,
+  type ManagedProcessHandle,
+  type ManagedProcessRequest,
   type ProcessJournalStore,
+  type ProcessExitRecord,
 } from '../../processes/ProcessSupervisor';
 import {
   buildClaudeArgs,
@@ -29,6 +31,8 @@ class FakeChildProcess extends EventEmitter {
   readonly stdout = new EventEmitter();
   readonly stderr = new EventEmitter();
   readonly pid: number;
+  exitCode: number | null = null;
+  signalCode: NodeJS.Signals | null = null;
   killed = false;
   readonly kill = vi.fn((_signal?: NodeJS.Signals | number) => {
     this.killed = true;
@@ -39,6 +43,14 @@ class FakeChildProcess extends EventEmitter {
   constructor(pid: number) {
     super();
     this.pid = pid;
+  }
+
+  override emit(eventName: string | symbol, ...args: unknown[]): boolean {
+    if (eventName === 'close') {
+      this.exitCode = (args[0] as number | null | undefined) ?? null;
+      this.signalCode = (args[1] as NodeJS.Signals | null | undefined) ?? null;
+    }
+    return super.emit(eventName, ...args);
   }
 }
 
@@ -316,6 +328,71 @@ describe('ClaudeCliAdapter', () => {
     expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0);
   });
 
+  it('leaves task process settlement at the supervisor default', async () => {
+    const child = new FakeChildProcess(7300);
+    const exit = deferred<ProcessExitRecord>();
+    const requests: ManagedProcessRequest[] = [];
+    const processSupervisor = {
+      spawn: vi.fn(async (request: ManagedProcessRequest): Promise<ManagedProcessHandle> => {
+        requests.push(request);
+        return {
+          id: request.id ?? 'run-1',
+          pid: child.pid,
+          child: child as unknown as ChildProcess,
+          startedAt: '2026-08-21T00:00:00.000Z',
+          waitForExit: () => exit.promise,
+          terminate: () => exit.promise,
+        };
+      }),
+    } as unknown as ProcessSupervisor;
+    const harness = createHarness({ processSupervisor });
+
+    await harness.adapter.runPrompt(runOptions());
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).not.toHaveProperty('settlement');
+    expect(requests[0]).not.toHaveProperty('closeTimeoutMs');
+    child.emit('close', 0, null);
+  });
+
+  it('keeps the task lease until child close after an early supervised exit record', async () => {
+    const child = new FakeChildProcess(7301);
+    const exit = deferred<ProcessExitRecord>();
+    const processSupervisor = {
+      spawn: vi.fn(async (request: ManagedProcessRequest): Promise<ManagedProcessHandle> => ({
+        id: request.id ?? 'run-1',
+        pid: child.pid,
+        child: child as unknown as ChildProcess,
+        startedAt: '2026-08-21T00:00:00.000Z',
+        waitForExit: () => exit.promise,
+        terminate: () => exit.promise,
+      })),
+    } as unknown as ProcessSupervisor;
+    const harness = createHarness({ processSupervisor });
+
+    await harness.adapter.runPrompt(runOptions());
+    exit.resolve({
+      id: 'run-1',
+      pid: child.pid,
+      kind: 'claude',
+      sessionId: 'project-key::session-1',
+      taskId: 'project-key::session-1',
+      runId: 'run-1',
+      startedAt: '2026-08-21T00:00:00.000Z',
+      endedAt: '2026-08-21T00:00:01.000Z',
+      exitCode: null,
+      signal: null,
+      durationMs: 1_000,
+      error: 'early-managed-exit',
+    });
+    await exit.promise;
+    await Promise.resolve();
+
+    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(1);
+    child.emit('close', null, null);
+    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0);
+  });
+
   it('applies the resolver environment patch after provider and task environment', async () => {
     const providerEnvironment: ProviderEnvironmentPort = {
       resolveChildEnvironment: vi.fn((_options, inherited) => ({
@@ -403,7 +480,7 @@ describe('ClaudeCliAdapter', () => {
     expect(envelopes.filter((item) => item.event.type === 'session_completed')).toHaveLength(1);
   });
 
-  it('retains cleanup ownership and the ordinary lease when start-journal cleanup is unconfirmed', async () => {
+  it('releases the ordinary lease when the default supervisor rejects start journaling', async () => {
     const child = new FakeChildProcess(7200);
     let closeOnKill = false;
     vi.mocked(child.kill).mockImplementation(() => {
@@ -433,14 +510,16 @@ describe('ClaudeCliAdapter', () => {
       rejection = error;
     }
 
-    expect(rejection).toBeInstanceOf(ManagedProcessCleanupUnconfirmedError);
-    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(1);
+    expect(rejection).toEqual(expect.objectContaining({
+      message: expect.stringMatching(/journal rejected launch/i),
+    }));
+    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0);
     expect(child.kill).toHaveBeenCalledTimes(1);
 
     closeOnKill = true;
     await harness.adapter.stopAll();
 
-    expect(child.kill).toHaveBeenCalledTimes(2);
+    expect(child.kill).toHaveBeenCalledTimes(1);
     expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0);
   });
 
