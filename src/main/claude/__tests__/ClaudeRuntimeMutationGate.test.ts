@@ -26,7 +26,9 @@ describe("ClaudeRuntimeMutationGate", () => {
     const lease = gate.tryAcquireOrdinary()!;
     lease.release();
     lease.release();
-    expect(gate.snapshot()).toEqual({
+    const snapshot = gate.snapshot();
+    expect(Object.isFrozen(snapshot)).toBe(true);
+    expect(snapshot).toEqual({
       ordinaryLeaseCount: 0,
       updateActive: false,
     });

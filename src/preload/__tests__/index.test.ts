@@ -315,6 +315,11 @@ describe('preload Claude Code update API', () => {
       2,
       IPC_CHANNELS.CLAUDE_CODE_UPDATE_NOW,
     );
+    expect(electronMocks.invoke).toHaveBeenCalledTimes(2);
+    expect(electronMocks.invoke.mock.calls).toStrictEqual([
+      [IPC_CHANNELS.CLAUDE_CODE_UPDATE_GET_STATE],
+      [IPC_CHANNELS.CLAUDE_CODE_UPDATE_NOW],
+    ]);
     expect(api).not.toHaveProperty('invoke');
     expect(api).not.toHaveProperty('updateClaudeCode');
   });
