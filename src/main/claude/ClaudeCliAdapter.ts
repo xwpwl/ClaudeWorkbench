@@ -5,8 +5,10 @@ import path from 'path';
 import { StringDecoder } from 'node:string_decoder';
 import { ClaudeEventParser } from './ClaudeEventParser';
 import {
+  ManagedProcessCleanupUnconfirmedError,
   ProcessSupervisor,
-  type ManagedProcessHandle,
+  type CloseOwnedManagedProcessHandle,
+  type ManagedProcessCleanupCapability,
 } from '../processes/ProcessSupervisor';
 import {
   mergeClaudeInvocationEnvironment,
@@ -73,7 +75,12 @@ interface ActiveRun {
   stderrTail: string;
   stderrBuffer: string;
   stderrDecoder: StringDecoder;
-  managedProcess: ManagedProcessHandle;
+  managedProcess: CloseOwnedManagedProcessHandle;
+  runtimeLease: ClaudeRuntimeLease;
+}
+
+interface PendingRuntimeCleanup {
+  cleanup: ManagedProcessCleanupCapability;
   runtimeLease: ClaudeRuntimeLease;
 }
 
@@ -244,6 +251,7 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
   private readonly terminationForceMs: number;
   private readonly providerEnvironment?: ProviderEnvironmentPort;
   private readonly activeRuns = new Map<string, ActiveRun>();
+  private readonly pendingRuntimeCleanups = new Set<PendingRuntimeCleanup>();
 
   constructor(options: AdapterOptions) {
     super();
@@ -328,7 +336,7 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
     let secretPatterns: string[];
     let args: string[];
     let parser: ClaudeEventParser;
-    let managedProcess: ManagedProcessHandle;
+    let managedProcess: CloseOwnedManagedProcessHandle;
     try {
       if (this.activeRuns.has(options.runId)) throw new Error('Duplicate run id');
       cwd = path.resolve(options.projectPath);
@@ -406,6 +414,7 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
         sessionId: stableTaskId(options),
         taskId: stableTaskId(options),
         runId: options.runId,
+        confirmCloseOwnership: true,
         options: {
           cwd,
           env: childEnv,
@@ -419,9 +428,13 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
       try {
         this.permissionBroker?.cancelRun(options.runId, 'spawn failed');
       } catch {
-        // Preserve the original launch failure.
+        // Preserve the original launch failure while retaining cleanup ownership.
       } finally {
-        runtimeLease.release();
+        if (error instanceof ManagedProcessCleanupUnconfirmedError) {
+          this.pendingRuntimeCleanups.add({ cleanup: error.cleanup, runtimeLease });
+        } else {
+          runtimeLease.release();
+        }
       }
       throw error;
     }
@@ -552,14 +565,14 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
         }
       }
     };
-    if (child.exitCode !== null || child.signalCode !== null) {
-      void managedProcess.waitForExit().then(
-        (exit) => finalizeRun(exit.exitCode, exit.signal, exit.error),
-        () => finalizeRun(null, null, 'process supervision failed'),
-      ).catch(() => undefined);
-    } else {
-      child.once('close', (code, signal) => finalizeRun(code, signal));
-    }
+    let supervisedError: string | undefined;
+    void managedProcess.waitForExit().then(
+      (exit) => { supervisedError = exit.error; },
+      () => { supervisedError = 'process supervision failed'; },
+    ).catch(() => undefined);
+    void managedProcess.waitForClose().then(
+      (close) => finalizeRun(close.exitCode, close.signal, supervisedError),
+    ).catch(() => undefined);
 
     try {
       this.permissionBroker?.bindProcess(options.runId, child.pid ?? null);
@@ -575,7 +588,8 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
           graceMs: this.terminationGraceMs,
           forceMs: this.terminationForceMs,
         });
-        finalizeRun(exit.exitCode, exit.signal, exit.error);
+        const close = await managedProcess.waitForClose();
+        finalizeRun(close.exitCode, close.signal, exit.error);
       } catch (cleanupError) {
         throw new AggregateError(
           [bindError, cleanupError],
@@ -603,6 +617,7 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
         graceMs: this.terminationGraceMs,
         forceMs: this.terminationForceMs,
       });
+      await active.managedProcess.waitForClose();
     } catch (error) {
       // Keep a later child close observable so TaskManager can still release
       // its session and mutation locks after a termination failure.
@@ -613,9 +628,14 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
   }
 
   async stopAll(): Promise<void> {
-    await Promise.all(
-      [...this.activeRuns.keys()].map((runId) => this.stopRun(runId)),
-    );
+    await Promise.all([
+      ...[...this.activeRuns.keys()].map((runId) => this.stopRun(runId)),
+      ...[...this.pendingRuntimeCleanups].map(async (pending) => {
+        await pending.cleanup.retryCleanup({ forceMs: this.terminationForceMs });
+        this.pendingRuntimeCleanups.delete(pending);
+        pending.runtimeLease.release();
+      }),
+    ]);
   }
 
   subscribe(listener: (envelope: ClaudeEventEnvelope) => void): () => void {

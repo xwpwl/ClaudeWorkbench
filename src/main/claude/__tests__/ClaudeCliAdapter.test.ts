@@ -325,12 +325,14 @@ describe('ClaudeCliAdapter', () => {
 
     harness.calls[0].child.emit('close', 0, null);
 
-    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0);
+    await vi.waitFor(() => expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0));
   });
 
   it('leaves task process settlement at the supervisor default', async () => {
     const child = new FakeChildProcess(7300);
     const exit = deferred<ProcessExitRecord>();
+    const close = deferred<{ exitCode: number | null; signal: string | null }>();
+    child.once('close', (exitCode, signal) => close.resolve(Object.freeze({ exitCode, signal })));
     const requests: ManagedProcessRequest[] = [];
     const processSupervisor = {
       spawn: vi.fn(async (request: ManagedProcessRequest): Promise<ManagedProcessHandle> => {
@@ -341,6 +343,7 @@ describe('ClaudeCliAdapter', () => {
           child: child as unknown as ChildProcess,
           startedAt: '2026-08-21T00:00:00.000Z',
           waitForExit: () => exit.promise,
+          waitForClose: () => close.promise,
           terminate: () => exit.promise,
         };
       }),
@@ -351,13 +354,15 @@ describe('ClaudeCliAdapter', () => {
 
     expect(requests).toHaveLength(1);
     expect(requests[0]).not.toHaveProperty('settlement');
-    expect(requests[0]).not.toHaveProperty('closeTimeoutMs');
+    expect(requests[0]).toMatchObject({ confirmCloseOwnership: true });
     child.emit('close', 0, null);
   });
 
   it('keeps the task lease until child close after an early supervised exit record', async () => {
     const child = new FakeChildProcess(7301);
     const exit = deferred<ProcessExitRecord>();
+    const close = deferred<{ exitCode: number | null; signal: string | null }>();
+    child.once('close', (exitCode, signal) => close.resolve(Object.freeze({ exitCode, signal })));
     const processSupervisor = {
       spawn: vi.fn(async (request: ManagedProcessRequest): Promise<ManagedProcessHandle> => ({
         id: request.id ?? 'run-1',
@@ -365,6 +370,7 @@ describe('ClaudeCliAdapter', () => {
         child: child as unknown as ChildProcess,
         startedAt: '2026-08-21T00:00:00.000Z',
         waitForExit: () => exit.promise,
+        waitForClose: () => close.promise,
         terminate: () => exit.promise,
       })),
     } as unknown as ProcessSupervisor;
@@ -390,7 +396,7 @@ describe('ClaudeCliAdapter', () => {
 
     expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(1);
     child.emit('close', null, null);
-    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0);
+    await vi.waitFor(() => expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0));
   });
 
   it('applies the resolver environment patch after provider and task environment', async () => {
@@ -470,17 +476,18 @@ describe('ClaudeCliAdapter', () => {
     await vi.waitFor(() => expect(journal.recordStarted).toHaveBeenCalledOnce());
     expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(1);
 
-    child.emit('close', 0, null);
+    child.emit('close', null, null);
     expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(1);
     startJournal.resolve();
     await expect(run).resolves.toEqual({ runId: 'run-1', pid: 7100 });
     await vi.waitFor(() => expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0));
 
     expect(await harness.adapter.stopRun('run-1')).toBe(false);
-    expect(envelopes.filter((item) => item.event.type === 'session_completed')).toHaveLength(1);
+    expect(envelopes.filter((item) => item.event.type === 'session_failed')).toHaveLength(1);
   });
 
-  it('releases the ordinary lease when the default supervisor rejects start journaling', async () => {
+  it('retains start-journal cleanup ownership and the ordinary lease until retry confirms close', async () => {
+    vi.useFakeTimers();
     const child = new FakeChildProcess(7200);
     let closeOnKill = false;
     vi.mocked(child.kill).mockImplementation(() => {
@@ -500,27 +507,28 @@ describe('ClaudeCliAdapter', () => {
     });
     const harness = createHarness({
       processSupervisor,
-      terminationForceMs: 1,
     });
 
-    let rejection: unknown;
     try {
-      await harness.adapter.runPrompt(runOptions());
-    } catch (error) {
-      rejection = error;
+      const run = harness.adapter.runPrompt(runOptions());
+      const captured = run.catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(5_000);
+      const rejection = await captured;
+
+      expect(rejection).toEqual(expect.objectContaining({
+        code: 'MANAGED_PROCESS_CLEANUP_UNCONFIRMED',
+      }));
+      expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(1);
+      expect(child.kill).toHaveBeenCalledTimes(1);
+
+      closeOnKill = true;
+      await harness.adapter.stopAll();
+
+      expect(child.kill).toHaveBeenCalledTimes(2);
+      expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0);
+    } finally {
+      vi.useRealTimers();
     }
-
-    expect(rejection).toEqual(expect.objectContaining({
-      message: expect.stringMatching(/journal rejected launch/i),
-    }));
-    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0);
-    expect(child.kill).toHaveBeenCalledTimes(1);
-
-    closeOnKill = true;
-    await harness.adapter.stopAll();
-
-    expect(child.kill).toHaveBeenCalledTimes(1);
-    expect(harness.gate.snapshot().ordinaryLeaseCount).toBe(0);
   });
 
   it('owns and closes the child before rejecting a permission process-bind failure', async () => {
@@ -840,6 +848,9 @@ describe('ClaudeCliAdapter', () => {
     child.stderr.emit('data', Buffer.from(`${secret.slice(13)}\n`));
     child.stderr.emit('data', Buffer.from(`final detail ${secret}`));
     child.emit('close', 7, null);
+    await vi.waitFor(() => {
+      expect(envelopes.some((item) => item.event.type === 'session_failed')).toBe(true);
+    });
 
     const serialized = JSON.stringify(envelopes);
     expect(serialized).not.toContain(secret);
@@ -896,7 +907,7 @@ describe('ClaudeCliAdapter', () => {
 
     harness.calls[0].child.emit('close', 0, null);
 
-    expect(broker.completeRun).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(broker.completeRun).toHaveBeenCalledOnce());
     expect(broker.completeRun).toHaveBeenCalledWith('run-1');
   });
 
@@ -921,6 +932,9 @@ describe('ClaudeCliAdapter', () => {
       sessionKey: 'project-envelope::session-envelope',
     }));
     harness.calls[0].child.emit('close', 0, null);
+    await vi.waitFor(() => {
+      expect(envelopes.some((envelope) => envelope.event.type === 'session_completed')).toBe(true);
+    });
     const terminal = envelopes.find((envelope) => envelope.event.type === 'session_completed');
 
     expect(descriptor).toEqual({ runId: 'run-envelope', pid: 4000 });
@@ -947,6 +961,9 @@ describe('ClaudeCliAdapter', () => {
       '{"type":"system","subtype":"init","session_id":"real-session-id","model":"mimo"}\n',
     ));
     child.emit('close', 0, null);
+    await vi.waitFor(() => {
+      expect(envelopes.some((item) => item.event.type === 'session_completed')).toBe(true);
+    });
 
     expect(envelopes.find((item) => item.event.type === 'system_init')?.event)
       .toMatchObject({ sessionId: 'real-session-id' });
@@ -962,8 +979,10 @@ describe('ClaudeCliAdapter', () => {
 
     harness.calls[0].child.emit('close', 0, null);
 
-    expect(envelopes.filter((item) => item.event.type === 'session_completed'))
-      .toHaveLength(1);
+    await vi.waitFor(() => {
+      expect(envelopes.filter((item) => item.event.type === 'session_completed'))
+        .toHaveLength(1);
+    });
     expect(await harness.adapter.stopRun('run-1')).toBe(false);
   });
 
@@ -980,6 +999,9 @@ describe('ClaudeCliAdapter', () => {
     expect(envelopes.some((item) => item.event.type === 'assistant_text')).toBe(false);
 
     child.emit('close', 0, null);
+    await vi.waitFor(() => {
+      expect(envelopes.some((item) => item.event.type === 'assistant_text')).toBe(true);
+    });
 
     expect(envelopes.find((item) => item.event.type === 'assistant_text')?.event)
       .toMatchObject({ text: 'tail answer', messageId: 'message-tail' });
@@ -1024,6 +1046,9 @@ describe('ClaudeCliAdapter', () => {
 
     child.stderr.emit('data', Buffer.from('fatal: permission denied\n'));
     child.emit('close', 7, null);
+    await vi.waitFor(() => {
+      expect(envelopes.some((item) => item.event.type === 'session_failed')).toBe(true);
+    });
 
     const failures = envelopes.filter((item) => item.event.type === 'session_failed');
     expect(failures).toHaveLength(1);

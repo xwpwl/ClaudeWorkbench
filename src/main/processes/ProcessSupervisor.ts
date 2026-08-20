@@ -17,6 +17,12 @@ export interface ManagedProcessRequest {
   settlement?: ManagedProcessSettlement;
   closeTimeoutMs?: number;
   journalError?: ManagedProcessJournalError;
+  confirmCloseOwnership?: true;
+}
+
+export interface ManagedProcessCloseReceipt {
+  readonly exitCode: number | null;
+  readonly signal: string | null;
 }
 
 export interface ProcessStartRecord {
@@ -99,6 +105,10 @@ export interface ManagedProcessHandle {
   terminate(options?: ProcessTerminationOptions): Promise<ProcessExitRecord>;
 }
 
+export interface CloseOwnedManagedProcessHandle extends ManagedProcessHandle {
+  waitForClose(): Promise<ManagedProcessCloseReceipt>;
+}
+
 export interface ProcessSupervisorOptions {
   journal?: ProcessJournalStore;
   spawnProcess?: typeof spawn;
@@ -126,11 +136,13 @@ interface ActiveProcess {
   pendingError: unknown | undefined;
   settlement: ManagedProcessSettlement;
   journalError: ManagedProcessJournalError;
+  closeOwnership?: RawCloseConfirmation;
 }
 
 interface RawCloseConfirmation {
   isClosed(): boolean;
   wait(timeoutMs: number): Promise<boolean>;
+  waitForClose(): Promise<ManagedProcessCloseReceipt>;
   launchFailureReason(): ManagedProcessLaunchFailureReason;
 }
 
@@ -159,6 +171,10 @@ function wait(ms: number): Promise<'timeout'> {
 
 function observeRawClose(child: ChildProcess, observeError: boolean): RawCloseConfirmation {
   let closed = false;
+  let resolveClose!: (receipt: ManagedProcessCloseReceipt) => void;
+  const close = new Promise<ManagedProcessCloseReceipt>((resolve) => {
+    resolveClose = resolve;
+  });
   let launchFailureReason: ManagedProcessLaunchFailureReason = 'launch_failed';
   const waiters = new Set<(confirmed: boolean) => void>();
   const onError = (error: unknown): void => {
@@ -172,10 +188,11 @@ function observeRawClose(child: ChildProcess, observeError: boolean): RawCloseCo
       launchFailureReason = 'permission_denied';
     }
   };
-  const onClose = (): void => {
+  const onClose = (exitCode: number | null, signal: NodeJS.Signals | null): void => {
     closed = true;
     child.removeListener('close', onClose);
     if (observeError) child.removeListener('error', onError);
+    resolveClose(Object.freeze({ exitCode, signal }));
     for (const finish of waiters) finish(true);
     waiters.clear();
   };
@@ -185,6 +202,7 @@ function observeRawClose(child: ChildProcess, observeError: boolean): RawCloseCo
   return {
     isClosed: () => closed,
     launchFailureReason: () => launchFailureReason,
+    waitForClose: () => close,
     wait: (timeoutMs) => {
       if (closed) return Promise.resolve(true);
       return new Promise((resolve) => {
@@ -236,6 +254,10 @@ export class ProcessSupervisor {
     ));
   }
 
+  async spawn(
+    request: ManagedProcessRequest & { readonly confirmCloseOwnership: true },
+  ): Promise<CloseOwnedManagedProcessHandle>;
+  async spawn(request: ManagedProcessRequest): Promise<ManagedProcessHandle>;
   async spawn(request: ManagedProcessRequest): Promise<ManagedProcessHandle> {
     const id = request.id?.trim() || this.randomId();
     if (!id || id.length > 512 || id.includes('\0')) throw new Error('Invalid managed process id.');
@@ -250,7 +272,7 @@ export class ProcessSupervisor {
       ...request.options,
       shell: false,
     });
-    const rawClose = settlement === 'close-only'
+    const rawClose = settlement === 'close-only' || request.confirmCloseOwnership === true
       ? observeRawClose(child, !child.pid)
       : undefined;
     if (!child.pid) {
@@ -298,6 +320,7 @@ export class ProcessSupervisor {
       pendingError: undefined,
       settlement,
       journalError: request.journalError ?? 'raw',
+      ...(request.confirmCloseOwnership === true ? { closeOwnership: rawClose } : {}),
     };
     this.active.set(id, active);
 
@@ -434,6 +457,9 @@ export class ProcessSupervisor {
       startedAt: active.start.startedAt,
       waitForExit: () => active.exit,
       terminate: (options: ProcessTerminationOptions = {}) => this.terminateActive(active, options),
+      ...(active.closeOwnership
+        ? { waitForClose: () => active.closeOwnership!.waitForClose() }
+        : {}),
     });
   }
 

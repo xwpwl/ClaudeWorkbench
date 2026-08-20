@@ -67,6 +67,14 @@ function harness(options: {
   return { supervisor, children, calls, starts, exits };
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 describe('ProcessSupervisor', () => {
   it('records start and one terminal record with process ownership metadata', async () => {
     const test = harness();
@@ -139,7 +147,88 @@ describe('ProcessSupervisor', () => {
     test.children[0].emit('error', new Error('default-error'));
 
     await expect(handle.waitForExit()).resolves.toMatchObject({ error: 'default-error' });
+    expect(handle).not.toHaveProperty('waitForClose');
     expect(test.supervisor.getActiveProcesses()).toEqual([]);
+  });
+
+  it('captures an opted-in close receipt before start journaling settles', async () => {
+    const startJournal = deferred<void>();
+    const test = harness({ journalStart: () => startJournal.promise });
+    const spawning = test.supervisor.spawn({
+      id: 'close-owned-task',
+      kind: 'claude',
+      command: 'claude-test',
+      confirmCloseOwnership: true,
+    });
+    await Promise.resolve();
+
+    test.children[0].emit('close', null, null);
+    startJournal.resolve();
+    const handle = await spawning;
+    const waitForClose = (handle as typeof handle & {
+      waitForClose(): Promise<{ exitCode: number | null; signal: string | null }>;
+    }).waitForClose;
+
+    expect(waitForClose).toBeTypeOf('function');
+    const first = waitForClose.call(handle);
+    const second = waitForClose.call(handle);
+    await expect(first).resolves.toEqual({ exitCode: null, signal: null });
+    await expect(second).resolves.toBe(await first);
+    expect(Object.isFrozen(await first)).toBe(true);
+  });
+
+  it('transfers opted-in start-journal cleanup when close is unconfirmed', async () => {
+    vi.useFakeTimers();
+    try {
+      const test = harness({ journalStart: () => { throw new Error('journal-secret'); } });
+      const spawning = test.supervisor.spawn({
+        id: 'close-owned-journal-cleanup',
+        kind: 'claude',
+        command: 'claude-test',
+        confirmCloseOwnership: true,
+        closeTimeoutMs: 25,
+      });
+      const captured = spawning.catch((caught: unknown) => caught);
+      await vi.advanceTimersByTimeAsync(25);
+
+      const error = await captured;
+      expect(error).toBeInstanceOf(ManagedProcessCleanupUnconfirmedError);
+      const cleanup = (error as ManagedProcessCleanupUnconfirmedError).cleanup;
+      const retry = cleanup.retryCleanup({ forceMs: 40 });
+      expect(test.children[0].kill).toHaveBeenCalledTimes(2);
+      test.children[0].emit('close', null, 'SIGKILL');
+      await expect(retry).resolves.toBeUndefined();
+      await expect(cleanup.retryCleanup()).resolves.toBeUndefined();
+      expect(test.children[0].kill).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('transfers opted-in missing-PID cleanup when close is unconfirmed', async () => {
+    vi.useFakeTimers();
+    try {
+      const test = harness({ pid: 0 });
+      const spawning = test.supervisor.spawn({
+        kind: 'claude',
+        command: 'claude-test',
+        confirmCloseOwnership: true,
+        closeTimeoutMs: 25,
+      });
+      const captured = spawning.catch((caught: unknown) => caught);
+      await vi.advanceTimersByTimeAsync(25);
+
+      const error = await captured;
+      expect(error).toBeInstanceOf(ManagedProcessCleanupUnconfirmedError);
+      const cleanup = (error as ManagedProcessCleanupUnconfirmedError).cleanup;
+      const retry = cleanup.retryCleanup({ forceMs: 40 });
+      expect(test.children[0].kill).toHaveBeenCalledTimes(2);
+      test.children[0].emit('close', null, 'SIGKILL');
+      await expect(retry).resolves.toBeUndefined();
+      expect(test.children[0].kill).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('waits for raw close before rejecting a close-only launch without a PID', async () => {
