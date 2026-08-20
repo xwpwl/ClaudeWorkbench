@@ -2,11 +2,12 @@ import crypto from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import vm from 'node:vm'
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, describe, expect, it } from 'vitest'
 
 const workspaceRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 const runnerPath = path.join(workspaceRoot, 'scripts', 'release', 'lib', 'trusted-windows-runner.mjs')
@@ -517,8 +518,7 @@ async function runLockedVitestCacheFixture(root: string, noCache: boolean): Prom
 }
 
 const disposableRoots: string[] = []
-const releaseValidationRoot = path.join(workspaceRoot, 'release-validation')
-const fixtureSuiteRoot = path.join(releaseValidationRoot, `task2c1-fixtures-${process.pid}-${crypto.randomUUID()}`)
+const fixtureSuiteRoot = path.join(os.tmpdir(), `workbench-task2c1-fixtures-${process.pid}-${crypto.randomUUID()}`)
 const fixtureParentDirectories = [
   'cmd-baseline',
   'controller',
@@ -528,19 +528,9 @@ const fixtureParentDirectories = [
   'reporter',
   'vitest-cache',
 ].map((name) => path.join(fixtureSuiteRoot, name))
-let releaseValidationRootExistedBeforeSuite = false
 
 function fixtureParentDirectory(name: string): string {
   return path.join(fixtureSuiteRoot, name)
-}
-
-async function directoryExists(directory: string): Promise<boolean> {
-  try {
-    return (await fs.stat(directory)).isDirectory()
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
-    throw error
-  }
 }
 
 async function removeEmptyDirectory(directory: string, allowNonEmpty: boolean): Promise<void> {
@@ -554,10 +544,6 @@ async function removeEmptyDirectory(directory: string, allowNonEmpty: boolean): 
   }
 }
 
-beforeAll(async () => {
-  releaseValidationRootExistedBeforeSuite = await directoryExists(releaseValidationRoot)
-})
-
 afterEach(async () => {
   for (const root of disposableRoots.splice(0)) {
     await fs.rm(root, { recursive: true, force: true })
@@ -569,9 +555,6 @@ afterAll(async () => {
     await removeEmptyDirectory(parent, false)
   }
   await removeEmptyDirectory(fixtureSuiteRoot, false)
-  if (!releaseValidationRootExistedBeforeSuite) {
-    await removeEmptyDirectory(releaseValidationRoot, true)
-  }
 })
 
 function occurrences(source: string, marker: string): number {
@@ -1297,7 +1280,7 @@ async function createControllerTreeFixture(mode: 'timeout' | 'stdout' | 'stderr'
   })
   const criticalInputs = [...(request.criticalInputs as Array<Record<string, unknown>>), {
     path: scriptPath,
-    boundary: workspaceRoot,
+    boundary: root,
     sha256: await sha256File(scriptPath),
     protected: false,
   }]
@@ -2275,7 +2258,7 @@ describe('trusted Windows runner production surface', () => {
       ...base,
       criticalInputs: [...(base.criticalInputs as Array<Record<string, unknown>>), {
         path: scriptPath,
-        boundary: workspaceRoot,
+        boundary: root,
         sha256: await sha256File(scriptPath),
         protected: false,
       }],
@@ -2299,7 +2282,7 @@ describe('trusted Windows runner production surface', () => {
       ...base,
       criticalInputs: [...(base.criticalInputs as Array<Record<string, unknown>>), {
         path: scriptPath,
-        boundary: workspaceRoot,
+        boundary: root,
         sha256: await sha256File(scriptPath),
         protected: false,
       }],

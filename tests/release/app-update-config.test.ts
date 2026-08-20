@@ -172,28 +172,46 @@ describe('non-routing updater bootstrap configuration', () => {
   });
 
   it('fails closed on byte drift or an unsupported mode without rewriting the tracked file', () => {
-    const original = fs.readFileSync(configPath);
-    const changed = Buffer.concat([original, Buffer.from('# changed\n', 'utf8')]);
-    try {
-      fs.writeFileSync(configPath, changed);
-      const mismatch = runGenerator('--verify');
-      expect(mismatch.error).toBeUndefined();
-      expect(mismatch.status).toBe(1);
-      expect(mismatch.stdout).toBe('app-update.yml: MISMATCH\n');
-      expect(mismatch.stderr).toBe('');
-      expect(fs.readFileSync(configPath)).toEqual(changed);
+    const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-update-generator-mismatch-'));
+    temporaryDirectories.push(fixture);
+    fs.mkdirSync(path.join(fixture, 'scripts'));
+    fs.mkdirSync(path.join(fixture, 'src', 'shared'), { recursive: true });
+    fs.mkdirSync(path.join(fixture, 'build-resources'));
+    const fixtureGeneratorPath = path.join(fixture, 'scripts', 'generate-app-update-config.mjs');
+    const fixtureConfigPath = path.join(fixture, 'build-resources', 'app-update.yml');
+    fs.copyFileSync(generatorPath, fixtureGeneratorPath);
+    fs.copyFileSync(contractPath, path.join(fixture, 'src', 'shared', 'update-bootstrap-contract.json'));
+    const changed = Buffer.concat([EXPECTED_BYTES, Buffer.from('# changed\n', 'utf8')]);
+    fs.writeFileSync(fixtureConfigPath, changed);
+    const runFixtureGenerator = (mode: string) => spawnSync(
+      process.execPath,
+      [fixtureGeneratorPath, mode],
+      {
+        cwd: fixture,
+        encoding: 'utf8',
+        env: {
+          SystemRoot: process.env.SystemRoot,
+          WINDIR: process.env.WINDIR,
+        },
+        windowsHide: true,
+      },
+    );
 
-      const unsupported = runGenerator('--unsupported');
-      expect(unsupported.error).toBeUndefined();
-      expect(unsupported.status).toBe(1);
-      expect(unsupported.stdout).toBe('');
-      expect(unsupported.stderr).toBe(
-        'Usage: node scripts/generate-app-update-config.mjs --write|--verify\n',
-      );
-      expect(fs.readFileSync(configPath)).toEqual(changed);
-    } finally {
-      fs.writeFileSync(configPath, original);
-    }
+    const mismatch = runFixtureGenerator('--verify');
+    expect(mismatch.error).toBeUndefined();
+    expect(mismatch.status).toBe(1);
+    expect(mismatch.stdout).toBe('app-update.yml: MISMATCH\n');
+    expect(mismatch.stderr).toBe('');
+    expect(fs.readFileSync(fixtureConfigPath)).toEqual(changed);
+
+    const unsupported = runFixtureGenerator('--unsupported');
+    expect(unsupported.error).toBeUndefined();
+    expect(unsupported.status).toBe(1);
+    expect(unsupported.stdout).toBe('');
+    expect(unsupported.stderr).toBe(
+      'Usage: node scripts/generate-app-update-config.mjs --write|--verify\n',
+    );
+    expect(fs.readFileSync(fixtureConfigPath)).toEqual(changed);
     expect(fs.readFileSync(configPath)).toEqual(EXPECTED_BYTES);
   });
 
