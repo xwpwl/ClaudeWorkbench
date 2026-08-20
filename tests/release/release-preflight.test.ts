@@ -968,6 +968,9 @@ function occurrences(source: string, marker: string): number {
   return source.split(marker).length - 1
 }
 
+let extractedCoreFactory: ((testDeps: unknown) => ReturnType<typeof _createCoreShape>) | undefined
+let extractedCoreBlock: string | undefined
+
 async function extractedCore(deps = makeDeps()) {
   const source = await sourceOrFail()
   expect(occurrences(source, CORE_START), 'preflight core start marker count').toBe(1)
@@ -977,11 +980,16 @@ async function extractedCore(deps = makeDeps()) {
   const markerBlock = source.slice(start, end)
   const executedBlock = markerBlock
   expect(executedBlock, 'test core must execute the exact production marker bytes').toBe(markerBlock)
-  const create = new vm.Script(`${executedBlock}\ncreatePreflightCore`).runInNewContext({
-    Array, BigInt, Boolean, Date, Error, JSON, Map, Math, Number, Object, Promise,
-    Reflect, Set, String, TypeError, WeakMap, WeakSet,
-  }) as (testDeps: unknown) => ReturnType<typeof _createCoreShape>
-  return create(deps)
+  if (extractedCoreFactory === undefined) {
+    extractedCoreBlock = executedBlock
+    extractedCoreFactory = new vm.Script(`${executedBlock}\ncreatePreflightCore`).runInNewContext({
+      Array, BigInt, Boolean, Date, Error, JSON, Map, Math, Number, Object, Promise,
+      Reflect, Set, String, TypeError, WeakMap, WeakSet,
+    }) as (testDeps: unknown) => ReturnType<typeof _createCoreShape>
+  } else {
+    expect(executedBlock, 'cached test core must remain byte-identical').toBe(extractedCoreBlock)
+  }
+  return extractedCoreFactory(deps)
 }
 
 function _createCoreShape() {
@@ -1024,6 +1032,23 @@ async function completedPreflight(core: Awaited<ReturnType<typeof extractedCore>
     itemId: evidence.itemId,
   }
   return { context, report, preflightReference }
+}
+
+async function ownedBindingContextAfterEarlyChildFailure(
+  core: Awaited<ReturnType<typeof extractedCore>>,
+  state: TestState,
+) {
+  const { dependencyBootstrap } = await bootstrapped(core)
+  const context = expectedContext()
+  state.commandFailures['lifecycle-electron-install'] = {
+    status: 'FAIL', category: 'child-nonzero', exitCode: 7,
+  }
+  const result = await core.runPreflight({ context, dependencyBootstrap })
+  expect(result.status).toBe('FAIL')
+  expect(publishedReport(state).blocker).toBe('Preflight npm-ci failed')
+  expect(state.calls).toContain('command:lifecycle-electron-install')
+  expect(state.calls.some((call) => call.startsWith('command:typecheck'))).toBe(false)
+  return { context }
 }
 
 async function expectedBindingsForState(state: TestState) {
@@ -3118,7 +3143,7 @@ describe('bindings and frozen consumers', () => {
   it('Task2C2 lock gate rejects unrelated complete-lock drift after reaching the owned held post-install read', async () => {
     const state = newState()
     const core = await extractedCore(makeDeps(state))
-    const { context } = await completedPreflight(core, state)
+    const { context } = await ownedBindingContextAfterEarlyChildFailure(core, state)
     const lock = JSON.parse(await fs.readFile(path.join(workspaceRoot, 'package-lock.json'), 'utf8'))
     lock.task2c2UnreviewedTopLevel = 'drift'
     const writesBefore = [...state.writes]
@@ -3135,7 +3160,7 @@ describe('bindings and frozen consumers', () => {
   it('rejects a nested duplicate package-lock key inside an owned post-install lease', async () => {
     const state = newState()
     const core = await extractedCore(makeDeps(state))
-    const { context } = await completedPreflight(core, state)
+    const { context } = await ownedBindingContextAfterEarlyChildFailure(core, state)
     const original = await fs.readFile(path.join(workspaceRoot, 'package-lock.json'), 'utf8')
     const needle = '"version": "1.0.1-rc.1"'
     const first = original.indexOf(needle)
@@ -3151,7 +3176,7 @@ describe('bindings and frozen consumers', () => {
   it('returns the exact frozen ordered PostInstallBindings projection read-only', async () => {
     const state = newState()
     const core = await extractedCore(makeDeps(state))
-    const { context } = await completedPreflight(core, state)
+    const { context } = await ownedBindingContextAfterEarlyChildFailure(core, state)
     const writesBefore = [...state.writes]
     const bindings = await core.loadPostInstallBindings({ workspaceRoot, context })
     expect(bindings).toEqual(await expectedBindingsForState(state))
@@ -3167,7 +3192,7 @@ describe('bindings and frozen consumers', () => {
   it.each(WORKSPACE_ENTRY_ROWS)('rejects post-gate workspace entry %s byte drift through the owned low-level lease', async (_id, relativePath) => {
     const state = newState()
     const core = await extractedCore(makeDeps(state))
-    const { context } = await completedPreflight(core, state)
+    const { context } = await ownedBindingContextAfterEarlyChildFailure(core, state)
     const writesBefore = [...state.writes]
     const changed = new Uint8Array(await fs.readFile(path.join(workspaceRoot, ...relativePath.split('/'))))
     changed[0] ^= 1
@@ -3189,7 +3214,7 @@ describe('bindings and frozen consumers', () => {
   it.each(PACKAGE_ROWS)('rejects lock integrity drift for package %s after reaching the owned low-level lease', async (_name, _version, _integrity, rootRelativePath) => {
     const state = newState()
     const core = await extractedCore(makeDeps(state))
-    const { context } = await completedPreflight(core, state)
+    const { context } = await ownedBindingContextAfterEarlyChildFailure(core, state)
     const writesBefore = [...state.writes]
     const lock = JSON.parse(await fs.readFile(path.join(workspaceRoot, 'package-lock.json'), 'utf8'))
     lock.packages[rootRelativePath].integrity = `sha512-drift-${rootRelativePath}`
@@ -3204,7 +3229,7 @@ describe('bindings and frozen consumers', () => {
   it.each(PACKAGE_ROWS)('rejects package identity drift for %s after the final-tree observation', async (name, version, _integrity, rootRelativePath) => {
     const state = newState()
     const core = await extractedCore(makeDeps(state))
-    const { context } = await completedPreflight(core, state)
+    const { context } = await ownedBindingContextAfterEarlyChildFailure(core, state)
     const writesBefore = [...state.writes]
     const relativePath = `${rootRelativePath}/package.json`
     const alteredName = `${name.slice(0, -1)}${name.at(-1) === 'x' ? 'y' : 'x'}`
@@ -3219,7 +3244,7 @@ describe('bindings and frozen consumers', () => {
   it.each(PACKAGE_ROWS)('rejects independently observed package tree drift for %s', async (_name, _version, _integrity, rootRelativePath) => {
     const state = newState()
     const core = await extractedCore(makeDeps(state))
-    const { context } = await completedPreflight(core, state)
+    const { context } = await ownedBindingContextAfterEarlyChildFailure(core, state)
     const writesBefore = [...state.writes]
     state.packageTreeDriftRoot = rootRelativePath
     await expect(core.loadPostInstallBindings({ workspaceRoot, context })).rejects.toThrow(/package tree drifted/iu)
@@ -3230,7 +3255,7 @@ describe('bindings and frozen consumers', () => {
   it.each(PACKAGE_ENTRY_ROWS)('rejects explicit package entry %s byte drift after whole-tree observations', async (id, _packageName, relativePath) => {
     const state = newState()
     const core = await extractedCore(makeDeps(state))
-    const { context } = await completedPreflight(core, state)
+    const { context } = await ownedBindingContextAfterEarlyChildFailure(core, state)
     const writesBefore = [...state.writes]
     const original = state.virtualFiles!.get(relativePath)!
     const changed = new Uint8Array(original)
@@ -3245,7 +3270,7 @@ describe('bindings and frozen consumers', () => {
   it('rejects a same-path file identity replacement inside an owned binding lease', async () => {
     const state = newState()
     const core = await extractedCore(makeDeps(state))
-    const { context } = await completedPreflight(core, state)
+    const { context } = await ownedBindingContextAfterEarlyChildFailure(core, state)
     const writesBefore = [...state.writes]
     state.openIdentityOverrides = { 'package-lock.json': 'replacement-inode' }
     await expect(core.loadPostInstallBindings({ workspaceRoot, context })).rejects.toThrow(/binding changed/iu)
