@@ -508,7 +508,7 @@ function Assert-NonReparsePath([string]$LiteralPath, [string]$Boundary, [bool]$R
   return $full
 }
 
-function Assert-ProtectedAcl($Api, [string]$LiteralPath) {
+function Assert-ProtectedAcl($Api, [string]$LiteralPath, $VerifiedPaths = $null) {
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
   $processToken = [IntPtr]::Zero
   $impersonationToken = [IntPtr]::Zero
@@ -537,6 +537,7 @@ function Assert-ProtectedAcl($Api, [string]$LiteralPath) {
     }
 
     foreach ($protectedPath in $paths) {
+      if ($null -ne $VerifiedPaths -and $VerifiedPaths.Contains($protectedPath)) { continue }
       $acl = Get-Acl -LiteralPath $protectedPath
       $securityDescriptorBytes = $acl.GetSecurityDescriptorBinaryForm()
       $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($securityDescriptorBytes, 0)
@@ -566,6 +567,7 @@ function Assert-ProtectedAcl($Api, [string]$LiteralPath) {
         if ($privilegeSet -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($privilegeSet) }
         [Runtime.InteropServices.Marshal]::FreeHGlobal($securityDescriptor)
       }
+      if ($null -ne $VerifiedPaths) { [void]$VerifiedPaths.Add($protectedPath) }
     }
   } finally {
     if ($mapping -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($mapping) }
@@ -622,6 +624,8 @@ function Assert-BoundFile($Api, $Bound) {
 
 function Get-CanonicalTree($Api, [string]$Root, [string[]]$Selected, [bool]$Protected) {
   $rows = [Collections.Generic.Dictionary[string,object]]::new([StringComparer]::Ordinal)
+  $verifiedAclPaths = $null
+  if ($Protected) { $verifiedAclPaths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal) }
   function Visit([string]$FullPath) {
     $item = Get-Item -LiteralPath $FullPath -Force
     if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'reparse' }
@@ -631,7 +635,7 @@ function Get-CanonicalTree($Api, [string]$Root, [string[]]$Selected, [bool]$Prot
       foreach ($child in $children) { Visit $child }
       return
     }
-    if ($Protected) { Assert-ProtectedAcl $Api $FullPath }
+    if ($Protected) { Assert-ProtectedAcl $Api $FullPath $verifiedAclPaths }
     $stream = [IO.File]::Open($FullPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
     try {
       $rootPrefix = $Root.TrimEnd('\') + '\'

@@ -378,6 +378,41 @@ async function runExtractedCanonicalTree(root: string, selected: readonly string
   })
 }
 
+type ProtectedCanonicalTreeProbe = Readonly<{
+  aclPasses: readonly (readonly string[])[]
+  trees: readonly Readonly<{ fileCount: number, totalBytes: number, treeSha256: string }>[]
+}>
+
+async function runExtractedProtectedCanonicalTree(
+  root: string,
+  selected: readonly string[],
+): Promise<ProtectedCanonicalTreeProbe> {
+  const controller = await exactControllerSource()
+  const stateMarker = '\n$api = $null'
+  const stateIndex = controller.indexOf(stateMarker)
+  expect(stateIndex, 'controller function prefix').toBeGreaterThan(0)
+  const controllerFunctions = controller.slice(0, stateIndex)
+  const script = [
+    controllerFunctions,
+    '$script:aclPaths = [Collections.Generic.List[string]]::new()',
+    'function Get-Acl {',
+    '  param([string]$LiteralPath)',
+    '  $script:aclPaths.Add([IO.Path]::GetFullPath($LiteralPath))',
+    '  return Microsoft.PowerShell.Security\\Get-Acl -LiteralPath $LiteralPath',
+    '}',
+    '$api = New-NativeApi',
+    `$firstTree = Get-CanonicalTree $api ${JSON.stringify(root)} @(${selected.map((item) => JSON.stringify(item)).join(',')}) $true`,
+    '$firstAclPass = @($script:aclPaths)',
+    '$script:aclPaths.Clear()',
+    `$secondTree = Get-CanonicalTree $api ${JSON.stringify(root)} @(${selected.map((item) => JSON.stringify(item)).join(',')}) $true`,
+    '[Console]::Out.Write(([ordered]@{ aclPasses=@($firstAclPass,@($script:aclPaths)); trees=@($firstTree,$secondTree) } | ConvertTo-Json -Compress -Depth 4))',
+  ].join('\n')
+  const result = await runExactControllerBytes(Buffer.from('{}\n', 'utf8'), script)
+  if (result.code !== 0) throw new Error(`Protected canonical tree fixture failed: ${result.stderr}`)
+  expect(result.stderr).toBe('')
+  return JSON.parse(result.stdout)
+}
+
 type NodeModulesTreeSnapshot = Readonly<{
   canonicalTreeBytes: string
   fileCount: number
@@ -1704,6 +1739,45 @@ describe('trusted Windows runner production surface', () => {
     await expect(runExtractedCanonicalTree(root, ['nested/c.bin', 'a.txt', 'B.txt'])).resolves.toEqual({
       fileCount: 3, totalBytes: 3, treeSha256: expectedTreeSha256,
     })
+  }, 30_000)
+
+  it.runIf(process.platform === 'win32')('audits each protected npm ACL path once per canonical-tree pass without changing the tree facts', async () => {
+    const npmRoot = path.win32.join(reviewedProgramFiles, 'nodejs', 'node_modules', 'npm')
+    const selected = ['bin/npm-cli.js', 'package.json'] as const
+    const rows = await Promise.all(selected.map(async (relativePath) => {
+      const bytes = await fs.readFile(path.win32.join(npmRoot, ...relativePath.split('/')))
+      return {
+        relativePath,
+        size: bytes.length,
+        fileSha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+      }
+    }))
+    rows.sort((left, right) => left.relativePath < right.relativePath ? -1 : left.relativePath > right.relativePath ? 1 : 0)
+    const expectedTreeBytes = Buffer.from(`${JSON.stringify(rows)}\n`, 'utf8')
+    const expectedAclPaths: string[] = []
+    const seen = new Set<string>()
+    for (const relativePath of selected) {
+      const absolute = path.win32.join(npmRoot, ...relativePath.split('/'))
+      const root = path.win32.parse(absolute).root
+      let current = root
+      for (const candidate of [root, ...absolute.slice(root.length).split('\\').filter(Boolean).map((component) => {
+        current = path.win32.join(current, component)
+        return current
+      })]) {
+        if (seen.has(candidate)) continue
+        seen.add(candidate)
+        expectedAclPaths.push(candidate)
+      }
+    }
+
+    const result = await runExtractedProtectedCanonicalTree(npmRoot, selected)
+    const expectedTree = {
+      fileCount: 2,
+      totalBytes: rows.reduce((total, row) => total + row.size, 0),
+      treeSha256: crypto.createHash('sha256').update(expectedTreeBytes).digest('hex'),
+    }
+    expect(result.trees).toEqual([expectedTree, expectedTree])
+    expect(result.aclPasses).toEqual([expectedAclPaths, expectedAclPaths])
   }, 30_000)
 
   it.runIf(process.platform === 'win32')('holds all nine alternate-case test-full inputs through execution and releases them after receipt without public leakage', async () => {
