@@ -2,6 +2,8 @@ import { EventEmitter } from 'node:events';
 import type { ChildProcess, SpawnOptions } from 'node:child_process';
 import { describe, expect, it, vi } from 'vitest';
 import {
+  ManagedProcessCleanupUnconfirmedError,
+  ManagedProcessLaunchError,
   ProcessSupervisor,
   type ProcessExitRecord,
   type ProcessStartRecord,
@@ -22,8 +24,10 @@ class FakeChild extends EventEmitter {
 
 function harness(options: {
   journalStart?: (record: ProcessStartRecord) => void | Promise<void>;
+  synchronousJournalStart?: boolean;
   journalExit?: (record: ProcessExitRecord) => void | Promise<void>;
   platform?: NodeJS.Platform;
+  pid?: number;
   taskkill?: (pid: number, force: boolean, timeoutMs: number) => Promise<'terminated' | 'not_found'>;
   verify?: () => boolean | Promise<boolean>;
 } = {}) {
@@ -32,7 +36,7 @@ function harness(options: {
   const starts: ProcessStartRecord[] = [];
   const exits: ProcessExitRecord[] = [];
   const spawnProcess = vi.fn((command: string, args: readonly string[], spawnOptions: SpawnOptions) => {
-    const child = new FakeChild(1000 + children.length);
+    const child = new FakeChild(options.pid ?? 1000 + children.length);
     children.push(child);
     calls.push({ command, args: [...args], options: spawnOptions });
     return child as unknown as ChildProcess;
@@ -43,10 +47,15 @@ function harness(options: {
     defaultGraceMs: 0,
     defaultForceMs: 25,
     journal: {
-      recordStarted: async (record) => {
-        starts.push(record);
-        await options.journalStart?.(record);
-      },
+      recordStarted: options.synchronousJournalStart
+        ? (record) => {
+          starts.push(record);
+          options.journalStart?.(record);
+        }
+        : async (record) => {
+          starts.push(record);
+          await options.journalStart?.(record);
+        },
       recordExited: async (record) => {
         exits.push(record);
         await options.journalExit?.(record);
@@ -56,6 +65,14 @@ function harness(options: {
     verifyPersistedIdentity: options.verify,
   });
   return { supervisor, children, calls, starts, exits };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }
 
 describe('ProcessSupervisor', () => {
@@ -76,6 +93,513 @@ describe('ProcessSupervisor', () => {
     expect(test.exits).toHaveLength(1);
     expect(test.supervisor.getActiveProcesses()).toEqual([]);
     expect(test.starts[0]).not.toHaveProperty('command');
+  });
+
+  it('keeps close-only ownership after error until close', async () => {
+    const test = harness();
+    const handle = await test.supervisor.spawn({
+      id: 'update',
+      kind: 'claude',
+      command: 'claude-test',
+      settlement: 'close-only',
+      closeTimeoutMs: 50,
+    });
+    const child = test.children[0];
+    child.emit('error', new Error('spawn-sentinel'));
+
+    expect(test.supervisor.getActiveProcesses()).toHaveLength(1);
+    let settled = false;
+    void handle.waitForExit().finally(() => { settled = true; });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    child.emit('close', null, null);
+    await expect(handle.waitForExit()).resolves.toMatchObject({
+      error: 'spawn-sentinel',
+    });
+    expect(test.supervisor.getActiveProcesses()).toEqual([]);
+  });
+
+  it('observes repeated close-only errors until close and records the first error', async () => {
+    const test = harness();
+    const handle = await test.supervisor.spawn({
+      id: 'repeated-errors', kind: 'claude', command: 'claude-test', settlement: 'close-only',
+    });
+    const child = test.children[0];
+
+    child.emit('error', new Error('first-error'));
+    expect(child.listenerCount('error')).toBe(1);
+    expect(() => child.emit('error', new Error('second-error'))).not.toThrow();
+    expect(test.supervisor.getActiveProcesses()).toHaveLength(1);
+
+    child.emit('close', null, null);
+    await expect(handle.waitForExit()).resolves.toMatchObject({ error: 'first-error' });
+    expect(child.listenerCount('error')).toBe(0);
+    expect(child.listenerCount('close')).toBe(0);
+  });
+
+  it('keeps error-or-close settlement as the default', async () => {
+    const test = harness();
+    const handle = await test.supervisor.spawn({
+      id: 'default-settlement', kind: 'claude', command: 'claude-test',
+    });
+
+    test.children[0].emit('error', new Error('default-error'));
+
+    await expect(handle.waitForExit()).resolves.toMatchObject({ error: 'default-error' });
+    expect(handle).not.toHaveProperty('waitForClose');
+    expect(test.supervisor.getActiveProcesses()).toEqual([]);
+  });
+
+  it('captures an opted-in close receipt before start journaling settles', async () => {
+    const startJournal = deferred<void>();
+    const test = harness({ journalStart: () => startJournal.promise });
+    const spawning = test.supervisor.spawn({
+      id: 'close-owned-task',
+      kind: 'claude',
+      command: 'claude-test',
+      confirmCloseOwnership: true,
+    });
+    await Promise.resolve();
+
+    test.children[0].emit('close', null, null);
+    startJournal.resolve();
+    const handle = await spawning;
+    const waitForClose = (handle as typeof handle & {
+      waitForClose(): Promise<{ exitCode: number | null; signal: string | null }>;
+    }).waitForClose;
+
+    expect(waitForClose).toBeTypeOf('function');
+    const first = waitForClose.call(handle);
+    const second = waitForClose.call(handle);
+    await expect(first).resolves.toEqual({ exitCode: null, signal: null });
+    await expect(second).resolves.toBe(await first);
+    expect(Object.isFrozen(await first)).toBe(true);
+  });
+
+  it('retains opted-in error observation and termination ownership until close', async () => {
+    vi.useFakeTimers();
+    try {
+      const test = harness({ platform: 'linux' });
+      const handle = await test.supervisor.spawn({
+        id: 'close-owned-error',
+        kind: 'claude',
+        command: 'claude-test',
+        confirmCloseOwnership: true,
+      });
+      const child = test.children[0];
+      child.kill.mockImplementation((signal) => {
+        if (signal === 'SIGKILL') queueMicrotask(() => child.emit('close', null, 'SIGKILL'));
+        return true;
+      });
+
+      child.emit('error', new Error('first-error'));
+      await expect(handle.waitForExit()).resolves.toMatchObject({ error: 'first-error' });
+      expect(() => child.emit('error', new Error('second-error'))).not.toThrow();
+
+      const termination = handle.terminate({ graceMs: 0, forceMs: 25 });
+      await vi.advanceTimersByTimeAsync(0);
+      await expect(termination).resolves.toMatchObject({ error: 'first-error' });
+      await expect(handle.waitForClose()).resolves.toEqual({ exitCode: null, signal: 'SIGKILL' });
+      expect(child.kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL']);
+      expect(child.listenerCount('error')).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('transfers opted-in start-journal cleanup when close is unconfirmed', async () => {
+    vi.useFakeTimers();
+    try {
+      const test = harness({ journalStart: () => { throw new Error('journal-secret'); } });
+      const spawning = test.supervisor.spawn({
+        id: 'close-owned-journal-cleanup',
+        kind: 'claude',
+        command: 'claude-test',
+        confirmCloseOwnership: true,
+        closeTimeoutMs: 25,
+      });
+      const captured = spawning.catch((caught: unknown) => caught);
+      await vi.advanceTimersByTimeAsync(25);
+
+      const error = await captured;
+      expect(error).toBeInstanceOf(ManagedProcessCleanupUnconfirmedError);
+      const cleanup = (error as ManagedProcessCleanupUnconfirmedError).cleanup;
+      const retry = cleanup.retryCleanup({ forceMs: 40 });
+      expect(test.children[0].kill).toHaveBeenCalledTimes(2);
+      test.children[0].emit('close', null, 'SIGKILL');
+      await expect(retry).resolves.toBeUndefined();
+      await expect(cleanup.retryCleanup()).resolves.toBeUndefined();
+      expect(test.children[0].kill).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('transfers opted-in missing-PID cleanup when close is unconfirmed', async () => {
+    vi.useFakeTimers();
+    try {
+      const test = harness({ pid: 0 });
+      const spawning = test.supervisor.spawn({
+        kind: 'claude',
+        command: 'claude-test',
+        confirmCloseOwnership: true,
+        closeTimeoutMs: 25,
+      });
+      const captured = spawning.catch((caught: unknown) => caught);
+      await vi.advanceTimersByTimeAsync(25);
+
+      const error = await captured;
+      expect(error).toBeInstanceOf(ManagedProcessCleanupUnconfirmedError);
+      const cleanup = (error as ManagedProcessCleanupUnconfirmedError).cleanup;
+      const retry = cleanup.retryCleanup({ forceMs: 40 });
+      expect(test.children[0].kill).toHaveBeenCalledTimes(2);
+      test.children[0].emit('close', null, 'SIGKILL');
+      await expect(retry).resolves.toBeUndefined();
+      expect(test.children[0].kill).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('waits for raw close before rejecting a close-only launch without a PID', async () => {
+    vi.useFakeTimers();
+    try {
+      const test = harness({ pid: 0 });
+      const spawning = test.supervisor.spawn({
+        kind: 'claude', command: 'missing-pid-secret', args: ['secret-argv'],
+        options: { env: { SECRET_ENV: 'secret-env' }, cwd: 'C:\\secret-path' },
+        settlement: 'close-only', closeTimeoutMs: 50,
+      });
+      let settled = false;
+      void spawning.finally(() => { settled = true; }).catch(() => undefined);
+      await Promise.resolve();
+
+      expect(settled).toBe(false);
+      expect(test.children[0].kill).toHaveBeenCalledWith('SIGKILL');
+      expect(test.children[0].listenerCount('close')).toBe(1);
+      test.children[0].emit('close', null, 'SIGKILL');
+
+      await expect(spawning).rejects.toBeInstanceOf(ManagedProcessLaunchError);
+      await expect(spawning).rejects.toMatchObject({
+        name: 'ManagedProcessLaunchError',
+        reason: 'launch_failed',
+      });
+      expect(test.children[0].listenerCount('close')).toBe(0);
+      expect(test.children[0].listenerCount('error')).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(['EACCES', 'EPERM'] as const)(
+    'returns one fixed safe %s launch reason only after missing-PID close is confirmed',
+    async (code) => {
+      vi.useFakeTimers();
+      try {
+        const test = harness({ pid: 0 });
+        const spawning = test.supervisor.spawn({
+          kind: 'claude',
+          command: 'C:\\private-path\\claude.exe',
+          args: ['private-argv'],
+          options: { env: { PRIVATE_TOKEN: 'private-secret' } },
+          settlement: 'close-only',
+          closeTimeoutMs: 50,
+        });
+        const captured = spawning.catch((error: unknown) => error);
+        await Promise.resolve();
+
+        test.children[0].emit(
+          'error',
+          Object.assign(new Error(`spawn C:\\private-path ${code}`), { code }),
+        );
+        let settled = false;
+        void captured.then(() => {
+          settled = true;
+        });
+        await Promise.resolve();
+        expect(settled).toBe(false);
+
+        test.children[0].emit('close', null, null);
+        const error = (await captured) as Error & { reason?: unknown };
+
+        expect(error).toBeInstanceOf(ManagedProcessLaunchError);
+        expect(error).toMatchObject({
+          name: 'ManagedProcessLaunchError',
+          reason: 'permission_denied',
+        });
+        expect(String(error)).toBe(
+          'ManagedProcessLaunchError: Managed process launch failed.',
+        );
+        expect(JSON.stringify(error)).toBe('{"reason":"permission_denied"}');
+        for (const forbidden of [
+          'code',
+          'child',
+          'pid',
+          'command',
+          'args',
+          'argv',
+          'env',
+          'path',
+          'cause',
+        ]) {
+          expect(error).not.toHaveProperty(forbidden);
+        }
+        expect(test.children[0].listenerCount('close')).toBe(0);
+        expect(test.children[0].listenerCount('error')).toBe(0);
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it('observes repeated missing-PID errors until raw close', async () => {
+    vi.useFakeTimers();
+    try {
+      const test = harness({ pid: 0 });
+      const spawning = test.supervisor.spawn({
+        kind: 'claude', command: 'claude-test', settlement: 'close-only', closeTimeoutMs: 50,
+      });
+      void spawning.catch(() => undefined);
+      await Promise.resolve();
+
+      test.children[0].emit('error', new Error('first-missing-pid-error'));
+      expect(test.children[0].listenerCount('error')).toBe(1);
+      expect(() => test.children[0].emit('error', new Error('second-missing-pid-error'))).not.toThrow();
+      test.children[0].emit('close', null, 'SIGKILL');
+
+      await expect(spawning).rejects.toBeInstanceOf(ManagedProcessLaunchError);
+      await expect(spawning).rejects.toMatchObject({
+        name: 'ManagedProcessLaunchError',
+        reason: 'launch_failed',
+      });
+      expect(test.children[0].listenerCount('error')).toBe(0);
+      expect(test.children[0].listenerCount('close')).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('waits for raw close before rejecting a close-only launch whose start journal fails', async () => {
+    vi.useFakeTimers();
+    try {
+      const test = harness({ journalStart: () => { throw new Error('database closed'); } });
+      const spawning = test.supervisor.spawn({
+        id: 'journal-failure', kind: 'claude', command: 'claude-test',
+        settlement: 'close-only', closeTimeoutMs: 50,
+      });
+      let settled = false;
+      void spawning.finally(() => { settled = true; }).catch(() => undefined);
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(settled).toBe(false);
+      expect(test.children[0].kill).toHaveBeenCalledWith('SIGKILL');
+      test.children[0].emit('close', null, 'SIGKILL');
+
+      await expect(spawning).rejects.toThrow(/journal rejected launch/i);
+      expect(test.children[0].listenerCount('close')).toBe(0);
+      expect(test.children[0].listenerCount('error')).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('transfers missing-PID cleanup through one opaque idempotent capability', async () => {
+    vi.useFakeTimers();
+    try {
+      const test = harness({ pid: 0 });
+      const spawning = test.supervisor.spawn({
+        kind: 'claude', command: 'missing-pid-secret', args: ['secret-argv'],
+        options: { env: { SECRET_ENV: 'secret-env' }, cwd: 'C:\\secret-path' },
+        settlement: 'close-only', closeTimeoutMs: 25,
+      });
+      const captured = spawning.catch((caught: unknown) => caught);
+      await vi.advanceTimersByTimeAsync(25);
+
+      const error = await captured as Error & {
+        code?: string;
+        cleanup?: { retryCleanup(options?: { forceMs?: number }): Promise<void> };
+      };
+      expect(error).toBeInstanceOf(ManagedProcessCleanupUnconfirmedError);
+      expect(error.code).toBe('MANAGED_PROCESS_CLEANUP_UNCONFIRMED');
+      expect(Reflect.ownKeys(error.cleanup ?? {})).toEqual(['retryCleanup']);
+      for (const forbidden of ['child', 'pid', 'kill', 'terminate', 'command', 'args', 'argv', 'env', 'environment', 'cwd', 'path']) {
+        expect(error).not.toHaveProperty(forbidden);
+        expect(error.cleanup).not.toHaveProperty(forbidden);
+      }
+
+      const firstRetry = error.cleanup!.retryCleanup({ forceMs: 40 });
+      const concurrentRetry = error.cleanup!.retryCleanup({ forceMs: 40 });
+      expect(test.children[0].kill).toHaveBeenCalledTimes(2);
+      test.children[0].emit('close', null, 'SIGKILL');
+      await expect(Promise.all([firstRetry, concurrentRetry])).resolves.toEqual([undefined, undefined]);
+
+      await expect(error.cleanup!.retryCleanup({ forceMs: 40 })).resolves.toBeUndefined();
+      expect(test.children[0].kill).toHaveBeenCalledTimes(2);
+      expect(test.children[0].listenerCount('close')).toBe(0);
+      expect(test.children[0].listenerCount('error')).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('transfers failed-journal cleanup through one opaque idempotent capability', async () => {
+    vi.useFakeTimers();
+    try {
+      const test = harness({ journalStart: () => { throw new Error('journal-secret'); } });
+      const spawning = test.supervisor.spawn({
+        id: 'journal-cleanup', kind: 'claude', command: 'command-secret', args: ['argv-secret'],
+        options: { env: { TOKEN: 'env-secret' }, cwd: 'C:\\path-secret' },
+        settlement: 'close-only', closeTimeoutMs: 25,
+      });
+      const captured = spawning.catch((caught: unknown) => caught);
+      await vi.advanceTimersByTimeAsync(25);
+
+      const error = await captured as Error & {
+        code?: string;
+        cleanup?: { retryCleanup(options?: { forceMs?: number }): Promise<void> };
+      };
+      expect(error).toBeInstanceOf(ManagedProcessCleanupUnconfirmedError);
+      expect(error.code).toBe('MANAGED_PROCESS_CLEANUP_UNCONFIRMED');
+      expect(Reflect.ownKeys(error.cleanup ?? {})).toEqual(['retryCleanup']);
+      for (const forbidden of ['child', 'pid', 'kill', 'terminate', 'command', 'args', 'argv', 'env', 'environment', 'cwd', 'path']) {
+        expect(error).not.toHaveProperty(forbidden);
+        expect(error.cleanup).not.toHaveProperty(forbidden);
+      }
+
+      const retry = error.cleanup!.retryCleanup({ forceMs: 40 });
+      expect(test.children[0].kill).toHaveBeenCalledTimes(2);
+      test.children[0].emit('close', null, 'SIGKILL');
+      await expect(retry).resolves.toBeUndefined();
+      await expect(error.cleanup!.retryCleanup()).resolves.toBeUndefined();
+      expect(test.children[0].kill).toHaveBeenCalledTimes(2);
+      expect(test.children[0].listenerCount('close')).toBe(0);
+      expect(test.children[0].listenerCount('error')).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('transfers synchronous start-journal failure cleanup without losing child ownership', async () => {
+    vi.useFakeTimers();
+    try {
+      const test = harness({
+        synchronousJournalStart: true,
+        journalStart: () => { throw new Error('synchronous-journal-secret'); },
+      });
+      const spawning = test.supervisor.spawn({
+        id: 'synchronous-journal-cleanup',
+        kind: 'claude',
+        command: 'command-secret',
+        args: ['argv-secret'],
+        options: { env: { TOKEN: 'env-secret' }, cwd: 'C:\\path-secret' },
+        settlement: 'close-only',
+        closeTimeoutMs: 25,
+      });
+      const captured = spawning.catch((caught: unknown) => caught);
+      await Promise.resolve();
+
+      expect(test.children[0].kill).toHaveBeenCalledWith('SIGKILL');
+      await vi.advanceTimersByTimeAsync(24);
+      let settled = false;
+      void captured.then(() => { settled = true; });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+
+      const error = await captured as Error & {
+        code?: string;
+        cleanup?: { retryCleanup(options?: { forceMs?: number }): Promise<void> };
+      };
+      expect(error).toBeInstanceOf(ManagedProcessCleanupUnconfirmedError);
+      expect(error.code).toBe('MANAGED_PROCESS_CLEANUP_UNCONFIRMED');
+      expect(Reflect.ownKeys(error.cleanup ?? {})).toEqual(['retryCleanup']);
+      for (const forbidden of ['child', 'pid', 'kill', 'terminate', 'command', 'args', 'argv', 'env', 'environment', 'cwd', 'path']) {
+        expect(error).not.toHaveProperty(forbidden);
+        expect(error.cleanup).not.toHaveProperty(forbidden);
+      }
+
+      const firstRetry = error.cleanup!.retryCleanup({ forceMs: 40 });
+      const concurrentRetry = error.cleanup!.retryCleanup({ forceMs: 40 });
+      expect(test.children[0].kill).toHaveBeenCalledTimes(2);
+      test.children[0].emit('close', null, 'SIGKILL');
+      await expect(Promise.all([firstRetry, concurrentRetry])).resolves.toEqual([undefined, undefined]);
+      await expect(error.cleanup!.retryCleanup()).resolves.toBeUndefined();
+      expect(test.children[0].kill).toHaveBeenCalledTimes(2);
+      expect(test.children[0].listenerCount('error')).toBe(0);
+      expect(test.children[0].listenerCount('close')).toBe(0);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['the default', undefined, 5_000],
+    ['a non-finite value', Number.POSITIVE_INFINITY, 5_000],
+    ['a negative value', -10, 0],
+    ['a fractional value', 10.9, 10],
+    ['an oversized value', 60_001, 60_000],
+  ] as const)('bounds %s close-only cleanup delay', async (_label, closeTimeoutMs, expectedDelay) => {
+    vi.useFakeTimers();
+    try {
+      const test = harness({ pid: 0 });
+      const spawning = test.supervisor.spawn({
+        kind: 'claude', command: 'claude-test', settlement: 'close-only', closeTimeoutMs,
+      });
+      const captured = spawning.catch((caught: unknown) => caught);
+
+      if (expectedDelay > 0) {
+        let settled = false;
+        void captured.then(() => { settled = true; });
+        await vi.advanceTimersByTimeAsync(expectedDelay - 1);
+        expect(settled).toBe(false);
+        await vi.advanceTimersByTimeAsync(1);
+      } else {
+        await vi.advanceTimersByTimeAsync(0);
+      }
+
+      await expect(captured).resolves.toMatchObject({
+        code: 'MANAGED_PROCESS_CLEANUP_UNCONFIRMED',
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps a returned close-only handle reusable after termination cannot confirm close', async () => {
+    vi.useFakeTimers();
+    try {
+      const test = harness();
+      const handle = await test.supervisor.spawn({
+        id: 'reusable-update', kind: 'claude', command: 'claude-test', settlement: 'close-only',
+      });
+      const firstTermination = handle.terminate({ graceMs: 0, forceMs: 25 });
+      const firstTerminationAssertion = expect(firstTermination)
+        .rejects.toThrow(/did not exit after force termination/i);
+      await vi.advanceTimersByTimeAsync(25);
+
+      await firstTerminationAssertion;
+      expect(test.supervisor.getActiveProcesses()).toHaveLength(1);
+
+      test.children[0].kill.mockImplementationOnce(() => {
+        queueMicrotask(() => test.children[0].emit('close', null, 'SIGTERM'));
+        return true;
+      });
+      await expect(handle.terminate({ graceMs: 25, forceMs: 25 })).resolves.toMatchObject({
+        signal: 'SIGTERM',
+      });
+      expect(test.supervisor.getActiveProcesses()).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('uses TERM and does not force a child that exits during grace', async () => {

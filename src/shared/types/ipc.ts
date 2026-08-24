@@ -18,6 +18,8 @@ import type {
 } from './session';
 import type { DiffResult, FileChange } from './fileChanges';
 export type { DiffResult } from './fileChanges';
+import type { ReleaseVersionInfo } from './release';
+export type { ReleaseVersionInfo } from './release';
 import type { DiffOptions, FileDiff, GitStatus, CommitPreview } from './git';
 import type {
   AcceptChangesResult,
@@ -268,6 +270,8 @@ export const IPC_CHANNELS = {
   RELEASE_CHECK_UPDATE: 'release:check-update',
   RELEASE_DOWNLOAD_UPDATE: 'release:download-update',
   RELEASE_INSTALL_UPDATE: 'release:install-update',
+  CLAUDE_CODE_UPDATE_GET_STATE: 'claude-code-update:get-state',
+  CLAUDE_CODE_UPDATE_NOW: 'claude-code-update:update-now',
 
   // System
   SYSTEM_CHECK_ENV: 'system:check-env',
@@ -511,6 +515,8 @@ export interface ClaudeWorkbenchAPI {
   checkForUpdates(): Promise<UpdateSnapshot>;
   downloadUpdate(): Promise<UpdateSnapshot>;
   installUpdate(confirmed: boolean): Promise<boolean>;
+  getClaudeCodeUpdateState(): Promise<ClaudeCodeUpdateSnapshot>;
+  updateClaudeCodeNow(): Promise<ClaudeCodeUpdateSnapshot>;
 
   // System
   checkEnvironment(): Promise<EnvironmentCheckResult>;
@@ -683,6 +689,8 @@ export const CLAUDE_WORKBENCH_API_METHOD_KINDS = Object.freeze({
   checkForUpdates: 'promise',
   downloadUpdate: 'promise',
   installUpdate: 'promise',
+  getClaudeCodeUpdateState: 'promise',
+  updateClaudeCodeNow: 'promise',
   checkEnvironment: 'promise',
   openPath: 'promise',
   selectDirectory: 'promise',
@@ -808,17 +816,22 @@ export const FIRST_RUN_RESUME_STEPS = [
 
 export type FirstRunResumeStep = (typeof FIRST_RUN_RESUME_STEPS)[number];
 
-export interface ReleaseVersionInfo {
-  version: string;
-  buildId: string;
-  commit: string;
-  channel: string;
-  electronVersion: string;
-  nodeVersion: string;
-  sqliteSchemaVersion: number;
-  agentRuntime: 'claude-code';
-  packaged: boolean;
-}
+export type ClaudeCodeUpdateStatus =
+  | 'idle' | 'blocked' | 'updating' | 'updated'
+  | 'up_to_date' | 'unavailable' | 'error';
+
+export type ClaudeCodeUpdateReason =
+  | 'active_tasks' | 'runtime_busy' | 'not_installed'
+  | 'unsupported_installation' | 'identity_changed' | 'invalid_version'
+  | 'permission_denied' | 'timed_out' | 'cleanup_unconfirmed'
+  | 'update_failed' | null;
+
+export type ClaudeCodeUpdateSnapshot = Readonly<{
+  status: ClaudeCodeUpdateStatus;
+  reason: ClaudeCodeUpdateReason;
+  beforeVersion: string | null;
+  afterVersion: string | null;
+}>;
 
 export type UpdateStatus =
   | 'idle'

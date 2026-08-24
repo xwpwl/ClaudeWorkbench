@@ -77,6 +77,12 @@ function installApi(overrides: Record<string, unknown> = {}) {
       agentRuntime: 'claude-code', packaged: true,
     })),
     getUpdateState: vi.fn(async () => ({ status: 'idle', version: null, reason: null, message: null })),
+    getClaudeCodeUpdateState: vi.fn(async () => ({
+      status: 'idle', reason: null, beforeVersion: null, afterVersion: null,
+    })),
+    updateClaudeCodeNow: vi.fn(async () => ({
+      status: 'idle', reason: null, beforeVersion: null, afterVersion: null,
+    })),
     setFirstRunResumeStep: vi.fn(async () => undefined),
     exportDiagnostics: vi.fn(async () => null),
     getGitWorkspaceStatus: vi.fn(async () => gitStatus()),
@@ -140,9 +146,12 @@ describe('Settings information architecture', () => {
   });
 
   it('opens Models & Connections directly for first-run Provider configuration', async () => {
+    const api = installApi();
     render(<SettingsDialog initialCategory="models" onClose={vi.fn()} />);
     expect(await screen.findByTestId('model-provider-center')).not.toBeNull();
     expect(screen.getByRole('button', { name: '模型与连接' }).getAttribute('aria-current')).toBe('page');
+    await waitFor(() => expect(api.getClaudeCodeUpdateState).toHaveBeenCalledOnce());
+    expect(api.updateClaudeCodeNow).not.toHaveBeenCalled();
   });
 
   it('uses a bounded, narrow-safe Settings shell without a fixed sidebar/content overflow', async () => {

@@ -11,8 +11,18 @@ import type {
 } from '../../shared/types/ipc';
 import type { PublicIpcRegistrar } from './public-invoke-boundary';
 import { PublicIpcError } from '../../shared/types/publicIpc';
+import {
+  mergeClaudeInvocationEnvironment,
+  type ClaudeInvocationResolverPort,
+  type ResolvedClaudeInvocation,
+} from '../claude/ClaudeInvocationResolver';
+import { ClaudeRuntimeMutationGate } from '../claude/ClaudeRuntimeMutationGate';
 
 export interface SystemIPCOptions {
+  claudeRuntime: {
+    resolver: ClaudeInvocationResolverPort;
+    gate: ClaudeRuntimeMutationGate;
+  };
   /** Dynamic provider is preferred because registered projects can change after startup. */
   allowedPaths?: readonly string[] | (() => readonly string[]);
   environmentFacts?: () => SystemEnvironmentFacts | Promise<SystemEnvironmentFacts>;
@@ -44,15 +54,8 @@ function runCommand(
   }).trim();
 }
 
-interface CommandInvocation {
-  executable: string;
-  prefixArgs: readonly string[];
-  displayPath: string;
-  environment?: NodeJS.ProcessEnv;
-}
-
 function runInvocation(
-  invocation: CommandInvocation,
+  invocation: ResolvedClaudeInvocation,
   args: readonly string[],
   timeout: number,
 ): string {
@@ -60,7 +63,7 @@ function runInvocation(
     invocation.executable,
     [...invocation.prefixArgs, ...args],
     timeout,
-    invocation.environment,
+    { ...mergeClaudeInvocationEnvironment(process.env, invocation) },
   );
 }
 
@@ -168,67 +171,6 @@ function resolveCommandPath(command: string): string | null {
   return resolveCommandPaths(command)[0] ?? null;
 }
 
-function createNpmClaudeInvocation(displayPath: string): CommandInvocation | null {
-  const cliPath = path.join(
-    path.dirname(displayPath),
-    'node_modules',
-    '@anthropic-ai',
-    'claude-code',
-    'cli.js',
-  );
-  try {
-    if (!fs.statSync(cliPath).isFile()) return null;
-    return {
-      executable: process.execPath,
-      prefixArgs: [fs.realpathSync.native(cliPath)],
-      displayPath,
-      environment: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-    };
-  } catch {
-    return null;
-  }
-}
-
-function resolveClaudeInvocation(): CommandInvocation | null {
-  const resolvedPaths = resolveCommandPaths('claude');
-  if (process.platform !== 'win32') {
-    const executable = resolvedPaths[0];
-    return executable ? { executable, prefixArgs: [], displayPath: executable } : null;
-  }
-
-  for (const candidate of resolvedPaths) {
-    const extension = path.extname(candidate).toLowerCase();
-    if (extension === '.exe' || extension === '.com') {
-      return { executable: candidate, prefixArgs: [], displayPath: candidate };
-    }
-  }
-
-  for (const candidate of resolvedPaths) {
-    const invocation = createNpmClaudeInvocation(candidate);
-    if (invocation) return invocation;
-  }
-
-  const nativeCandidates = [
-    process.env.LOCALAPPDATA
-      ? path.join(process.env.LOCALAPPDATA, 'Programs', 'claude', 'claude.exe')
-      : null,
-    process.env.USERPROFILE
-      ? path.join(process.env.USERPROFILE, '.local', 'bin', 'claude.exe')
-      : null,
-  ].filter((candidate): candidate is string => candidate !== null);
-  for (const candidate of nativeCandidates) {
-    if (fs.existsSync(candidate)) {
-      return { executable: candidate, prefixArgs: [], displayPath: candidate };
-    }
-  }
-
-  if (process.env.APPDATA) {
-    const shimPath = path.join(process.env.APPDATA, 'npm', 'claude.cmd');
-    return createNpmClaudeInvocation(shimPath);
-  }
-  return null;
-}
-
 function resolveVSCodeExecutable(): string | null {
   const resolvedPaths = resolveCommandPaths('code');
   if (process.platform !== 'win32') return resolvedPaths[0] ?? null;
@@ -286,7 +228,7 @@ function detectGitBash(): { path: string | null; configured: boolean } {
 
 export function registerSystemIPC(
   ipcMain: PublicIpcRegistrar,
-  options: SystemIPCOptions = {},
+  options: SystemIPCOptions,
 ): void {
   ipcMain.handle(IPC_CHANNELS.SYSTEM_CHECK_ENV, async (): Promise<EnvironmentCheckResult> => {
     const result: EnvironmentCheckResult = {
@@ -313,17 +255,22 @@ export function registerSystemIPC(
     }
 
     // Check Claude Code
-    try {
-      const claudeInvocation = resolveClaudeInvocation();
-      if (!claudeInvocation) throw new Error(CLAUDE_PUBLIC_ERROR);
-      const claudeVersion = runInvocation(claudeInvocation, ['--version'], 10_000);
-      const claudePath = claudeInvocation.displayPath;
-      let installType = 'npm';
-      if (claudePath.includes('Program Files')) installType = 'global';
-      else if (path.extname(claudePath).toLowerCase() === '.exe') installType = 'local';
-      result.claude = { ok: true, version: claudeVersion, path: claudePath, installType };
-    } catch {
-      // Claude Code not found or not executable without a command shell.
+    const claudeLease = options.claudeRuntime.gate.tryAcquireOrdinary();
+    if (claudeLease) {
+      try {
+        const resolution = options.claudeRuntime.resolver.resolve();
+        if (!resolution.ok) throw new Error(CLAUDE_PUBLIC_ERROR);
+        const claudeVersion = runInvocation(resolution.invocation, ['--version'], 10_000);
+        const claudePath = resolution.invocation.displayPath;
+        let installType = 'npm';
+        if (claudePath.includes('Program Files')) installType = 'global';
+        else if (path.extname(claudePath).toLowerCase() === '.exe') installType = 'local';
+        result.claude = { ok: true, version: claudeVersion, path: claudePath, installType };
+      } catch {
+        // Claude Code not found or not executable without a command shell.
+      } finally {
+        claudeLease.release();
+      }
     }
 
     // Check Git
@@ -427,13 +374,20 @@ export function registerSystemIPC(
       const hasApiKey = !!process.env.ANTHROPIC_API_KEY;
 
       let loginStatus: ConnectionStatus['loginStatus'] = 'unknown';
-      try {
-        const claudeInvocation = resolveClaudeInvocation();
-        if (!claudeInvocation) throw new Error(CLAUDE_PUBLIC_ERROR);
-        runInvocation(claudeInvocation, ['--version'], 5_000);
-        loginStatus = 'available';
-      } catch {
+      const claudeLease = options.claudeRuntime.gate.tryAcquireOrdinary();
+      if (!claudeLease) {
         loginStatus = 'not-detected';
+      } else {
+        try {
+          const resolution = options.claudeRuntime.resolver.resolve();
+          if (!resolution.ok) throw new Error(CLAUDE_PUBLIC_ERROR);
+          runInvocation(resolution.invocation, ['--version'], 5_000);
+          loginStatus = 'available';
+        } catch {
+          loginStatus = 'not-detected';
+        } finally {
+          claudeLease.release();
+        }
       }
 
       return {
@@ -467,31 +421,39 @@ export function registerSystemIPC(
         error: null,
       };
 
-      try {
-        const claudeInvocation = resolveClaudeInvocation();
-        if (!claudeInvocation) throw new Error(CLAUDE_PUBLIC_ERROR);
-        result.claudePath = claudeInvocation.displayPath;
-
-        // Get version
-        const version = runInvocation(claudeInvocation, ['--version'], 10_000);
-        result.claudeVersion = version;
-
-        // Check base URL
-        if (process.env.ANTHROPIC_BASE_URL) {
-          result.baseUrlStatus = 'configured';
-        } else {
-          result.baseUrlStatus = 'default';
-        }
-
-        // Try a simple read-only test
+      const claudeLease = options.claudeRuntime.gate.tryAcquireOrdinary();
+      if (!claudeLease) {
+        result.error = CLAUDE_PUBLIC_ERROR;
+      } else {
         try {
-          runInvocation(claudeInvocation, ['--help'], 10_000);
-          result.success = true;
+          const resolution = options.claudeRuntime.resolver.resolve();
+          if (!resolution.ok) throw new Error(CLAUDE_PUBLIC_ERROR);
+          const claudeInvocation = resolution.invocation;
+          result.claudePath = claudeInvocation.displayPath;
+
+          // Get version
+          const version = runInvocation(claudeInvocation, ['--version'], 10_000);
+          result.claudeVersion = version;
+
+          // Check base URL
+          if (process.env.ANTHROPIC_BASE_URL) {
+            result.baseUrlStatus = 'configured';
+          } else {
+            result.baseUrlStatus = 'default';
+          }
+
+          // Try a simple read-only test
+          try {
+            runInvocation(claudeInvocation, ['--help'], 10_000);
+            result.success = true;
+          } catch {
+            result.error = CLAUDE_PUBLIC_ERROR;
+          }
         } catch {
           result.error = CLAUDE_PUBLIC_ERROR;
+        } finally {
+          claudeLease.release();
         }
-      } catch {
-        result.error = CLAUDE_PUBLIC_ERROR;
       }
 
       result.durationMs = Date.now() - startTime;
@@ -502,20 +464,24 @@ export function registerSystemIPC(
   ipcMain.handle(
     IPC_CHANNELS.SYSTEM_GET_DIAGNOSTICS,
     async (): Promise<DiagnosticsInfo> => {
-      const claudeInvocation = resolveClaudeInvocation();
-      const claudePath = claudeInvocation?.displayPath ?? null;
+      let claudePath: string | null = null;
       let claudeVersion: string | null = null;
       let installType: string | null = null;
-      try {
-        if (!claudeInvocation) throw new Error(CLAUDE_PUBLIC_ERROR);
-        claudeVersion = runInvocation(claudeInvocation, ['--version'], 5_000);
-        if (claudePath) {
+      const claudeLease = options.claudeRuntime.gate.tryAcquireOrdinary();
+      if (claudeLease) {
+        try {
+          const resolution = options.claudeRuntime.resolver.resolve();
+          if (!resolution.ok) throw new Error(CLAUDE_PUBLIC_ERROR);
+          claudePath = resolution.invocation.displayPath;
+          claudeVersion = runInvocation(resolution.invocation, ['--version'], 5_000);
           if (claudePath.includes('Program Files')) installType = 'global';
           else if (path.extname(claudePath).toLowerCase() === '.exe') installType = 'local';
           else installType = 'npm';
+        } catch {
+          // not found
+        } finally {
+          claudeLease.release();
         }
-      } catch {
-        // not found
       }
 
       const gitPath = resolveCommandPath('git');

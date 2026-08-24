@@ -4,6 +4,7 @@ import {
   CLAUDE_WORKBENCH_EVENT_METHODS,
   IPC_CHANNELS,
 } from '../../shared/types/ipc';
+import type { ReleaseVersionInfo } from '../../shared/types/ipc';
 
 const EVENT_METHODS = CLAUDE_WORKBENCH_EVENT_METHODS;
 
@@ -45,7 +46,7 @@ beforeEach(() => {
 });
 
 describe('preload exact named transport surface', () => {
-  it('exposes exactly 134 Promise methods and nine synchronous subscriptions with no raw IPC API', () => {
+  it('exposes exactly 136 Promise methods and nine synchronous subscriptions with no raw IPC API', () => {
     const transport = exposedTransport();
     expect(electronMocks.exposeInMainWorld.mock.calls.map(([name]) => name)).toStrictEqual([
       '__claudeWorkbenchIpcTransport',
@@ -59,9 +60,10 @@ describe('preload exact named transport surface', () => {
     expect(stringKeys).toStrictEqual(CLAUDE_WORKBENCH_API_METHODS);
     expect(keys).toHaveLength(CLAUDE_WORKBENCH_API_METHODS.length);
     expect(eventKeys).toStrictEqual(EVENT_METHODS);
-    expect(promiseKeys).toHaveLength(134);
+    expect(promiseKeys).toHaveLength(136);
     expect(stringKeys).not.toEqual(expect.arrayContaining([
       'invoke', 'on', 'send', 'removeListener', 'channel', 'then',
+      'updateClaudeCode',
     ]));
     for (const key of stringKeys) expect(typeof transport[key]).toBe('function');
   });
@@ -136,5 +138,39 @@ describe('preload exact named transport surface', () => {
       IPC_CHANNELS.CLAUDE_RUN_PROMPT,
       { prompt: 'fixed prompt', cwd: 'C:\\fixed-project' },
     );
+  });
+
+  it('preserves the exact public release projection in its fulfilled envelope', async () => {
+    const transport = exposedTransport();
+    const releaseVersion: ReleaseVersionInfo = {
+      version: '1.0.1-rc.1',
+      channel: 'rc',
+      buildId: '1.0.1-rc.1+0123456789ab.20260813T000000Z',
+      commit: '0123456789abcdef0123456789abcdef01234567',
+      electronVersion: '35.6.0',
+      nodeVersion: '22.14.0',
+      sqliteSchemaVersion: 7,
+      agentRuntime: 'claude-code',
+      packaged: true,
+      signatureStatus: 'NotSigned',
+      productionFeedConfigured: false,
+      licenseStatus: 'decision_required',
+      privacyStatus: 'draft',
+      releaseNotesSha256: 'a'.repeat(64),
+    };
+    electronMocks.invoke.mockResolvedValueOnce({
+      schemaVersion: 1,
+      ok: true,
+      value: releaseVersion,
+    });
+
+    await expect(transport.getReleaseVersion()).resolves.toStrictEqual({
+      schemaVersion: 1,
+      ok: true,
+      value: releaseVersion,
+    });
+    expect(electronMocks.invoke.mock.calls).toStrictEqual([
+      [IPC_CHANNELS.RELEASE_GET_VERSION],
+    ]);
   });
 });

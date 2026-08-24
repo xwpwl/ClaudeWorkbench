@@ -7,6 +7,11 @@ import {
   UpdateManager,
   type UpdateClient,
 } from '../UpdateManager';
+import {
+  loadUpdateBootstrapConfig,
+  prepareUpdaterCacheRoot,
+  resolveElectronUpdaterBaseCachePath,
+} from '../UpdateBootstrapConfig';
 
 const directories: string[] = [];
 
@@ -125,15 +130,98 @@ describe('UpdateManager', () => {
   });
 
   it('downloads only after availability and an explicit call', async () => {
+    const events: string[] = [];
+    const baseCachePath = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-cache-base-'));
+    directories.push(baseCachePath);
+    const bootstrap = loadUpdateBootstrapConfig({
+      packaged: false,
+      resourcesPath: 'unused',
+    });
+    const updater = client({
+      checkForUpdates: vi.fn(async () => ({
+        isUpdateAvailable: true, updateInfo: { version: '1.1.0' },
+      })),
+      downloadUpdate: vi.fn(async () => {
+        events.push('client-download');
+        return ['update.exe'];
+      }),
+    });
+    const manager = new UpdateManager(updater, {
+      isPackaged: true,
+      sourceConfigured: true,
+      prepareDownloadCache: () => {
+        events.push('cache-preflight');
+        return prepareUpdaterCacheRoot(baseCachePath, bootstrap);
+      },
+    });
+    await manager.checkForUpdates();
+    await expect(manager.downloadUpdate()).resolves.toMatchObject({ status: 'downloaded', version: '1.1.0' });
+    expect(events).toEqual(['cache-preflight', 'client-download']);
+    expect(fs.statSync(path.join(
+      baseCachePath,
+      bootstrap.updaterCacheDirName,
+      'pending',
+    )).isDirectory()).toBe(true);
+    expect(updater.downloadUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('matches electron-updater cache-base selection and rejects relative overrides', () => {
+    const homeDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-cache-home-'));
+    directories.push(homeDirectory);
+    const localAppData = path.join(homeDirectory, 'local-app-data');
+    const windowsFallback = path.join(homeDirectory, 'AppData', 'Local');
+    const macFallback = path.join(homeDirectory, 'Library', 'Caches');
+    const linuxFallback = path.join(homeDirectory, '.cache');
+    const xdgCacheHome = path.join(homeDirectory, 'xdg-cache');
+    for (const directory of [localAppData, windowsFallback, macFallback, linuxFallback, xdgCacheHome]) {
+      fs.mkdirSync(directory, { recursive: true });
+    }
+
+    expect(resolveElectronUpdaterBaseCachePath({
+      platform: 'win32', localAppData, homeDirectory,
+    })).toBe(localAppData);
+    expect(resolveElectronUpdaterBaseCachePath({
+      platform: 'win32', homeDirectory,
+    })).toBe(windowsFallback);
+    expect(resolveElectronUpdaterBaseCachePath({
+      platform: 'darwin', homeDirectory,
+    })).toBe(macFallback);
+    expect(resolveElectronUpdaterBaseCachePath({
+      platform: 'linux', xdgCacheHome, homeDirectory,
+    })).toBe(xdgCacheHome);
+    expect(resolveElectronUpdaterBaseCachePath({
+      platform: 'linux', homeDirectory,
+    })).toBe(linuxFallback);
+    expect(() => resolveElectronUpdaterBaseCachePath({
+      platform: 'win32', localAppData: 'relative-cache', homeDirectory,
+    })).toThrow('must be absolute');
+  });
+
+  it('blocks download before the client when pending is a real directory junction', async () => {
+    const baseCachePath = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-cache-base-'));
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'workbench-cache-outside-'));
+    directories.push(baseCachePath, outside);
+    const bootstrap = loadUpdateBootstrapConfig({
+      packaged: false,
+      resourcesPath: 'unused',
+    });
+    const cacheRoot = path.join(baseCachePath, bootstrap.updaterCacheDirName);
+    fs.mkdirSync(cacheRoot);
+    const pending = path.join(cacheRoot, 'pending');
+    fs.symlinkSync(outside, pending, 'junction');
     const updater = client({
       checkForUpdates: vi.fn(async () => ({
         isUpdateAvailable: true, updateInfo: { version: '1.1.0' },
       })),
     });
-    const manager = new UpdateManager(updater, { isPackaged: true, sourceConfigured: true });
+    const manager = new UpdateManager(updater, {
+      isPackaged: true,
+      sourceConfigured: true,
+      prepareDownloadCache: () => prepareUpdaterCacheRoot(baseCachePath, bootstrap),
+    });
     await manager.checkForUpdates();
-    await expect(manager.downloadUpdate()).resolves.toMatchObject({ status: 'downloaded', version: '1.1.0' });
-    expect(updater.downloadUpdate).toHaveBeenCalledTimes(1);
+    await expect(manager.downloadUpdate()).resolves.toMatchObject({ status: 'error' });
+    expect(updater.downloadUpdate).not.toHaveBeenCalled();
   });
 
   it('never installs without both a completed download and literal confirmation', async () => {
@@ -151,4 +239,3 @@ describe('UpdateManager', () => {
     expect(updater.quitAndInstall).toHaveBeenCalledWith(false, false);
   });
 });
-

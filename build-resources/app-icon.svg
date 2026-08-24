@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Workbench workflow">
+  <rect x="24" y="30" width="208" height="164" rx="30" fill="#0B1F3A"/>
+  <rect x="43" y="49" width="170" height="126" rx="20" fill="#F4FAFF"/>
+  <path d="M38 194h180a14 14 0 0 1 14 14v12H24v-12a14 14 0 0 1 14-14Z" fill="#123B73"/>
+  <path d="M78 105H128M128 105H178" stroke="#16B8C8" stroke-width="14" stroke-linecap="round"/>
+  <rect x="57" y="84" width="42" height="42" rx="11" fill="#1467E8"/>
+  <circle cx="128" cy="105" r="23" fill="#16B8C8"/>
+  <path d="m178 78 27 27-27 27-27-27Z" fill="#F2A51A"/>
+</svg>

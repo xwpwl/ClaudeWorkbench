@@ -172,6 +172,31 @@ describe('ProcessSupervisor release boundaries', () => {
       error: 'spawn EACCES',
     });
     expect(test.exits).toHaveLength(1);
+    expect(test.exits[0].error).toBe('spawn EACCES');
+  });
+
+  it('keeps a private close-only error in memory while journaling only a fixed redacted failure', async () => {
+    const test = releaseHarness();
+    const handle = await test.supervisor.spawn({
+      kind: 'claude',
+      command: 'claude.exe',
+      settlement: 'close-only',
+      journalError: 'redacted',
+    });
+    const privateError = 'spawn C:\\private\\claude-install\\SENTINEL-token';
+
+    test.children[0].emit('error', new Error(privateError));
+    test.children[0].emit('close', null, null);
+
+    await expect(handle.waitForExit()).resolves.toMatchObject({ error: privateError });
+    expect(test.exits).toHaveLength(1);
+    expect(test.exits[0]).toMatchObject({
+      exitCode: null,
+      signal: null,
+      error: 'managed-process-error',
+    });
+    expect(JSON.stringify(test.exits)).not.toContain('private');
+    expect(JSON.stringify(test.exits)).not.toContain('SENTINEL');
   });
 
   it('computes a non-negative lifecycle duration from the injected clock', async () => {
@@ -196,6 +221,25 @@ describe('ProcessSupervisor release boundaries', () => {
 
     await expect(handle.terminate({ graceMs: 0, forceMs: 25 })).resolves.toMatchObject({ signal: 'SIGKILL' });
     expect(test.children[0].kill.mock.calls.map(([signal]) => signal)).toEqual(['SIGTERM', 'SIGKILL']);
+  });
+
+  it('preserves Windows tree termination for close-only ownership', async () => {
+    let child: ReleaseFakeChild;
+    const taskkill = vi.fn(async () => {
+      queueMicrotask(() => child.emit('close', null, 'SIGKILL'));
+      return 'terminated' as const;
+    });
+    const test = releaseHarness({ platform: 'win32', taskkill });
+    child = test.children[0] as ReleaseFakeChild;
+    const handle = await test.supervisor.spawn({
+      kind: 'claude', command: 'claude.exe', settlement: 'close-only',
+    });
+    child = test.children[0];
+
+    await expect(handle.terminate({ graceMs: 0, forceMs: 25 })).resolves.toMatchObject({
+      signal: 'SIGKILL',
+    });
+    expect(taskkill).toHaveBeenCalledWith(child.pid, true, 25);
   });
 
   it('terminates all Claude, MCP, and Terminal children and empties the active registry', async () => {

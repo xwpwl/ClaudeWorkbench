@@ -1,7 +1,31 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { defineConfig } from 'vite';
-import path from 'path';
+
+const workspaceRoot = path.resolve(__dirname);
+const expectedMetadataPath = path.join(
+  workspaceRoot,
+  'release-validation',
+  'staging',
+  'release-metadata.json',
+);
+const configuredMetadataPath = process.env.WORKBENCH_RELEASE_METADATA_PATH;
+let releaseMetadataJson = 'null';
+
+if (configuredMetadataPath) {
+  const resolvedMetadataPath = path.resolve(configuredMetadataPath);
+  if (resolvedMetadataPath !== expectedMetadataPath) {
+    throw new Error('WORKBENCH_RELEASE_METADATA_PATH must name the fixed staging snapshot.');
+  }
+  releaseMetadataJson = fs.readFileSync(resolvedMetadataPath, 'utf8');
+  JSON.parse(releaseMetadataJson);
+}
 
 export default defineConfig({
+  define: {
+    __WORKBENCH_RELEASE_METADATA_JSON__: JSON.stringify(releaseMetadataJson),
+    __WORKBENCH_LOCAL_UPDATE_FIXTURE__: 'false',
+  },
   build: {
     outDir: 'dist/main',
     emptyOutDir: true,

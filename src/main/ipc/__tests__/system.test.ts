@@ -4,6 +4,8 @@ import path from 'path';
 import type { IpcMain } from 'electron';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { IPC_CHANNELS } from '../../../shared/types/ipc';
+import type { ResolvedClaudeInvocation } from '../../claude/ClaudeInvocationResolver';
+import { ClaudeRuntimeMutationGate } from '../../claude/ClaudeRuntimeMutationGate';
 
 const mocks = vi.hoisted(() => ({
   execFile: vi.fn(),
@@ -39,24 +41,47 @@ let mockCodeExecutable = '';
 let mockCodeShim = '';
 let mockClaudeExecutable = '';
 
+function claudeRuntimeDouble(invocationPatch: Partial<ResolvedClaudeInvocation> = {}) {
+  const invocation: ResolvedClaudeInvocation = Object.freeze({
+    executable: 'node-test',
+    prefixArgs: Object.freeze(['C:\\synthetic\\claude\\cli.js']),
+    environmentPatch: Object.freeze({ ELECTRON_RUN_AS_NODE: '1' }),
+    displayPath: 'C:\\synthetic\\claude\\claude.cmd',
+    canonicalTargetPath: 'C:\\synthetic\\claude\\cli.js',
+    provenance: 'npm',
+    ...invocationPatch,
+  });
+  const gate = new ClaudeRuntimeMutationGate();
+  const resolve = vi.fn(() => ({ ok: true as const, invocation }));
+  return { resolver: { resolve }, gate, resolve, invocation };
+}
+
+type HarnessOptions = Omit<
+  NonNullable<Parameters<typeof registerSystemIPC>[1]>,
+  'claudeRuntime'
+> & {
+  claudeRuntime?: ReturnType<typeof claudeRuntimeDouble>;
+};
+
 function harness(
-  options?: Parameters<typeof registerSystemIPC>[1],
+  options: HarnessOptions = {},
   publicTransport = false,
 ) {
   const handlers = new Map<string, Handler>();
   const ipcMain = {
     handle: vi.fn((channel: string, handler: Handler) => handlers.set(channel, handler)),
   } as unknown as IpcMain;
+  const claudeRuntime = options.claudeRuntime ?? claudeRuntimeDouble();
   registerSystemIPC(
     (publicTransport ? publicIpcMainForTest(ipcMain) : ipcMain) as never,
-    options,
+    { ...options, claudeRuntime } as Parameters<typeof registerSystemIPC>[1],
   );
   const invoke = (channel: string, ...args: unknown[]) => {
     const handler = handlers.get(channel);
     if (!handler) throw new Error(`Missing handler: ${channel}`);
     return handler({}, ...args);
   };
-  return { handlers, invoke, ipcMain };
+  return { handlers, invoke, ipcMain, claudeRuntime };
 }
 
 beforeEach(() => {
@@ -72,8 +97,8 @@ beforeEach(() => {
     callback: (error: Error | null) => void,
   ) => callback(null));
   mocks.execFileSync.mockImplementation((file: string, args: readonly string[]) => {
-    if (args[0] === '--version') return `${path.basename(file)} version 1.0.0`;
-    if (args[0] === '--help') return 'help';
+    if (args.at(-1) === '--version') return `${path.basename(file)} version 1.0.0`;
+    if (args.at(-1) === '--help') return 'help';
     if (file === 'where' || file === 'which') {
       if (args[0] === 'code') {
         return process.platform === 'win32' ? mockCodeShim : '/mock/bin/code';
@@ -310,6 +335,80 @@ describe('system path authorization', () => {
 });
 
 describe('system environment privacy and process execution', () => {
+  it.each([
+    [IPC_CHANNELS.SYSTEM_CHECK_ENV, ['--version']],
+    [IPC_CHANNELS.SYSTEM_GET_CONNECTION_STATUS, ['--version']],
+    [IPC_CHANNELS.SYSTEM_TEST_CLAUDE, ['--version', '--help']],
+    [IPC_CHANNELS.SYSTEM_GET_DIAGNOSTICS, ['--version']],
+  ] as const)(
+    'uses the injected Claude resolver and one ordinary lease for %s',
+    async (channel, expectedSuffixes) => {
+      const runtime = claudeRuntimeDouble();
+      const trace: string[] = [];
+      runtime.resolve.mockImplementation(() => {
+        trace.push(`resolve:${runtime.gate.snapshot().ordinaryLeaseCount}`);
+        return { ok: true, invocation: runtime.invocation };
+      });
+      mocks.execFileSync.mockImplementation((file: string, args: readonly string[]) => {
+        if (file === runtime.invocation.executable) {
+          trace.push(`${args.at(-1)}:${runtime.gate.snapshot().ordinaryLeaseCount}`);
+          return args.at(-1) === '--help' ? 'help' : '2.1.218 (Claude Code)';
+        }
+        if (file === 'where' || file === 'which') return `/mock/bin/${String(args[0])}`;
+        if (args.at(-1) === '--version') return `${path.basename(file)} version 1.0.0`;
+        return '';
+      });
+      const test = harness({ claudeRuntime: runtime });
+
+      await test.invoke(channel);
+
+      expect(runtime.resolve).toHaveBeenCalledOnce();
+      expect(trace).toEqual([
+        'resolve:1',
+        ...expectedSuffixes.map((suffix) => `${suffix}:1`),
+      ]);
+      expect(runtime.gate.snapshot().ordinaryLeaseCount).toBe(0);
+      expect(mocks.execFileSync).toHaveBeenCalledWith(
+        'node-test',
+        expect.arrayContaining(['C:\\synthetic\\claude\\cli.js']),
+        expect.objectContaining({
+          shell: false,
+          env: expect.objectContaining({ ELECTRON_RUN_AS_NODE: '1' }),
+        }),
+      );
+    },
+  );
+
+  it.each([
+    [IPC_CHANNELS.SYSTEM_CHECK_ENV, {
+      claude: { ok: false, version: null, path: null, installType: null },
+    }],
+    [IPC_CHANNELS.SYSTEM_GET_CONNECTION_STATUS, { loginStatus: 'not-detected' }],
+    [IPC_CHANNELS.SYSTEM_TEST_CLAUDE, {
+      success: false,
+      error: 'Claude Code is unavailable or could not be executed.',
+    }],
+    [IPC_CHANNELS.SYSTEM_GET_DIAGNOSTICS, {
+      claude: { path: null, version: null, installType: null },
+    }],
+  ] as const)(
+    'returns a bounded unavailable result without Claude work during an update for %s',
+    async (channel, expected) => {
+      const runtime = claudeRuntimeDouble();
+      const update = runtime.gate.tryAcquireUpdate();
+      const test = harness({ claudeRuntime: runtime });
+
+      await expect(test.invoke(channel)).resolves.toMatchObject(expected);
+
+      expect(runtime.resolve).not.toHaveBeenCalled();
+      expect(mocks.execFileSync.mock.calls.some(([file, args]) => (
+        file === runtime.invocation.executable
+        || ((file === 'where' || file === 'which') && args[0] === 'claude')
+      ))).toBe(false);
+      update?.release();
+    },
+  );
+
   it('returns only an http(s) base URL origin and path', async () => {
     process.env.ANTHROPIC_BASE_URL = 'https://user:password@proxy.example.com/anthropic/v1?api_key=secret#token';
     const test = harness();
@@ -414,15 +513,22 @@ describe('system environment privacy and process execution', () => {
       fs.writeFileSync(shimPath, '@echo off\r\n');
       fs.writeFileSync(cliPath, '');
       const canonicalCliPath = fs.realpathSync.native(cliPath);
+      const runtime = claudeRuntimeDouble({
+        executable: process.execPath,
+        prefixArgs: Object.freeze([canonicalCliPath]),
+        environmentPatch: Object.freeze({ ELECTRON_RUN_AS_NODE: '1' }),
+        displayPath: shimPath,
+        canonicalTargetPath: canonicalCliPath,
+        provenance: 'npm',
+      });
 
       mocks.execFileSync.mockImplementation((file: string, args: readonly string[]) => {
-        if (file === 'where' && args[0] === 'claude') return shimPath;
         if (file === process.execPath && args.at(-1) === '--version') return 'claude 1.0.0';
         if (file === process.execPath && args.at(-1) === '--help') return 'help';
         return '';
       });
 
-      const test = harness();
+      const test = harness({ claudeRuntime: runtime });
       await expect(test.invoke(IPC_CHANNELS.SYSTEM_TEST_CLAUDE)).resolves.toMatchObject({
         claudePath: shimPath,
         claudeVersion: 'claude 1.0.0',

@@ -111,4 +111,54 @@ describe('i18n', () => {
     expect(t('firstRun.provider.loadFailed' as LocaleKey)).toBe('Providers could not be loaded. Try again.');
     expect(t('firstRun.provider.retry' as LocaleKey)).toBe('Retry');
   });
+
+  it('localizes every bounded Claude Code update state in both supported locales', () => {
+    const expected = {
+      'zh-CN': {
+        'claudeUpdate.action': '立即更新',
+        'claudeUpdate.busy': '正在更新…',
+        'claudeUpdate.manualOnly': '仅在你点击“立即更新”后执行，不会自动更新。',
+        'claudeUpdate.updated': '更新完成。',
+        'claudeUpdate.upToDate': '已是最新版本。',
+        'claudeUpdate.loadFailed': '无法读取 Claude Code 更新状态。',
+        'claudeUpdate.genericError': 'Claude Code 更新当前不可用。',
+        'claudeUpdate.reason.activeTasks': 'Claude Code 正在执行任务，请在任务结束后重试。',
+        'claudeUpdate.reason.runtimeBusy': 'Claude Code 正在完成本地检查，请稍后重试。',
+        'claudeUpdate.reason.notInstalled': '未检测到 Claude Code。',
+        'claudeUpdate.reason.unsupportedInstallation': '当前安装不支持安全的自更新。',
+        'claudeUpdate.reason.identityChanged': '更新后安装身份发生变化，结果未被接受。',
+        'claudeUpdate.reason.invalidVersion': '无法验证更新后的 Claude Code 版本。',
+        'claudeUpdate.reason.permissionDenied': '没有权限更新 Claude Code。',
+        'claudeUpdate.reason.timedOut': 'Claude Code 更新超时。',
+        'claudeUpdate.reason.cleanupUnconfirmed': '无法确认更新进程已完全退出；本次会话已禁用更新。',
+        'claudeUpdate.reason.updateFailed': 'Claude Code 更新失败。',
+      },
+      'en-US': {
+        'claudeUpdate.action': 'Update now',
+        'claudeUpdate.busy': 'Updating…',
+        'claudeUpdate.manualOnly': 'Runs only when you click “Update now”; Claude Code is never updated automatically.',
+        'claudeUpdate.updated': 'Update complete.',
+        'claudeUpdate.upToDate': 'Claude Code is already up to date.',
+        'claudeUpdate.loadFailed': 'Claude Code update status could not be loaded.',
+        'claudeUpdate.genericError': 'Claude Code updating is currently unavailable.',
+        'claudeUpdate.reason.activeTasks': 'Claude Code is running a task. Try again after it finishes.',
+        'claudeUpdate.reason.runtimeBusy': 'Claude Code is finishing a local check. Try again shortly.',
+        'claudeUpdate.reason.notInstalled': 'Claude Code was not detected.',
+        'claudeUpdate.reason.unsupportedInstallation': 'This installation does not support a safe self-update.',
+        'claudeUpdate.reason.identityChanged': 'The installation identity changed after updating, so the result was not accepted.',
+        'claudeUpdate.reason.invalidVersion': 'The updated Claude Code version could not be verified.',
+        'claudeUpdate.reason.permissionDenied': 'Permission to update Claude Code was denied.',
+        'claudeUpdate.reason.timedOut': 'The Claude Code update timed out.',
+        'claudeUpdate.reason.cleanupUnconfirmed': 'The updater process could not be confirmed closed; updates are disabled for this session.',
+        'claudeUpdate.reason.updateFailed': 'Claude Code update failed.',
+      },
+    } as const;
+
+    for (const locale of ['zh-CN', 'en-US'] as const) {
+      setLocale(locale);
+      for (const [key, value] of Object.entries(expected[locale])) {
+        expect(t(key as LocaleKey)).toBe(value);
+      }
+    }
+  });
 });

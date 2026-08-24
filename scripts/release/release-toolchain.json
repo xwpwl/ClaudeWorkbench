@@ -1,0 +1,111 @@
+{
+  "schemaVersion": 1,
+  "platform": "win32",
+  "architecture": "x64",
+  "ownerReviewRequired": true,
+  "node": {
+    "programFilesRelativePath": "nodejs\\node.exe",
+    "version": "v24.15.0",
+    "sha256": "3331e1ffe19874215472217c5e94f5a0c6d8e18c4ac7111d3937aa0ad5e9b4a5"
+  },
+  "nativeAbi": {
+    "hostNode": {
+      "nodeVersion": "v24.15.0",
+      "modulesAbi": "137",
+      "napi": "10",
+      "platform": "win32",
+      "arch": "x64"
+    },
+    "electron": {
+      "electronVersion": "35.7.5",
+      "nodeVersion": "v22.16.0",
+      "modulesAbi": "133",
+      "napi": "10",
+      "platform": "win32",
+      "arch": "x64"
+    },
+    "sqlite": {
+      "packageName": "better-sqlite3",
+      "packageVersion": "13.0.2",
+      "loaderRelativePath": "node_modules/better-sqlite3/lib/win32-x64.js",
+      "nativeRelativePath": "node_modules/better-sqlite3/prebuilds/win32-x64.node",
+      "nativeSha256": "ecfb86221a674a6cdba63b1ac162b99386a61d0e38934b6c3dfcd9da11b6ee26",
+      "sqliteVersion": "3.53.4"
+    }
+  },
+  "npm": {
+    "programFilesRelativeRoot": "nodejs\\node_modules\\npm",
+    "version": "11.12.1",
+    "fileCount": 1740,
+    "totalBytes": 10520303,
+    "treeSha256": "a2b5872e8b827228d641001876d85ecd661ef9786f0a997923b27d3aa0a1b302"
+  },
+  "git": {
+    "programFilesRelativeRoot": "Git",
+    "version": "2.44.0.windows.1",
+    "criticalRelativePaths": [
+      "cmd/git.exe",
+      "mingw64/bin",
+      "mingw64/libexec/git-core"
+    ],
+    "fileCount": 292,
+    "totalBytes": 187055518,
+    "treeSha256": "249a931b5352181774f454e5c96e72fe4d39bdbf530b5713fe2cd8ef16d42ef5"
+  },
+  "windowsController": {
+    "powershellSystem32RelativePath": "WindowsPowerShell\\v1.0\\powershell.exe",
+    "powershellSha256": "7600ffe12da441fe89d035b13801e8e91d064bc544a27b19a5cf49f6ab8b18f5",
+    "cmdSystem32RelativePath": "cmd.exe",
+    "cmdSha256": "8dd1ebb0b969370c70a5ee7f7ee347949aa7046aa5e1a33fcd7b1e9415b21fc3",
+    "killOnJobClose": true,
+    "allowBreakaway": false
+  },
+  "dependencyBootstrap": {
+    "installArguments": [
+      "ci",
+      "--ignore-scripts",
+      "--no-audit",
+      "--no-fund"
+    ],
+    "preLifecycleTree": {
+      "fileCount": 26863,
+      "totalBytes": 673636131,
+      "treeSha256": "075e9bc083e4e2010b46f97b31c5a07c8b4ee5dbbd825e572f2252c578f6e939"
+    },
+    "lifecyclePayloads": [
+      {
+        "id": "electron-install",
+        "packageName": "electron",
+        "packageVersion": "35.7.5",
+        "workingDirectoryRelativePath": "electron",
+        "entryRelativePath": "electron/install.js",
+        "entrySha256": "3fa1166ed4db6831ed0d1aeec05295e460127d92b1216c794719e817eaefe0fb",
+        "arguments": []
+      },
+      {
+        "id": "esbuild-install",
+        "packageName": "esbuild",
+        "packageVersion": "0.28.1",
+        "workingDirectoryRelativePath": "esbuild",
+        "entryRelativePath": "esbuild/install.js",
+        "entrySha256": "612294e278914443bdcf81cb17f54afec34dbdd2ebd999a6ee187912320cc315",
+        "arguments": []
+      },
+      {
+        "id": "electron-winstaller-select-7z",
+        "packageName": "electron-winstaller",
+        "packageVersion": "5.4.0",
+        "workingDirectoryRelativePath": "electron-winstaller",
+        "entryRelativePath": "electron-winstaller/script/select-7z-arch.js",
+        "entrySha256": "3819ea164df4ab1d23a6e3f8a551f2029974aead10422f929d2ad169ef3049f4",
+        "arguments": []
+      }
+    ],
+    "finalTree": {
+      "fileCount": 26939,
+      "totalBytes": 973620188,
+      "treeSha256": "7cfa28860bfdce9c3ddc289b1aefcb84989eb84cb88585ac95021110a0349a39"
+    },
+    "electronExecutableSha256": "588bd82e36ad1acdae4615b6336284e420704389864f54ef2d10ea66c1a3cde0"
+  }
+}

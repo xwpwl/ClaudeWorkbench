@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "platform": "win32",
+  "architecture": "x64",
+  "programFilesRelativeNodePath": "nodejs\\node.exe",
+  "nodeVersion": "v24.15.0",
+  "nodeSha256": "3331e1ffe19874215472217c5e94f5a0c6d8e18c4ac7111d3937aa0ad5e9b4a5"
+}

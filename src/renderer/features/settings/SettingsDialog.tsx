@@ -8,7 +8,17 @@ import {
 import { useAppStore } from '../../stores/appStore';
 import { useWorkspaceStore } from '../../stores/workspaceStore';
 import { t, setLocale, type Locale, type LocaleKey } from '../../i18n';
-import type { AppSettings, ConnectionStatus, ClaudeTestResult, DiagnosticsInfo, EnvironmentCheckResult, ReleaseVersionInfo, UpdateSnapshot } from '../../../shared/types/ipc';
+import type {
+  AppSettings,
+  ClaudeCodeUpdateReason,
+  ClaudeCodeUpdateSnapshot,
+  ConnectionStatus,
+  ClaudeTestResult,
+  DiagnosticsInfo,
+  EnvironmentCheckResult,
+  ReleaseVersionInfo,
+  UpdateSnapshot,
+} from '../../../shared/types/ipc';
 import type { GitStatus } from '../../../shared/types/git';
 import type { Project } from '../../../shared/types/project';
 import { PERMISSION_MODES } from '../../../shared/types/claude';
@@ -52,6 +62,19 @@ const SETTINGS_FOCUSABLE_SELECTOR = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',');
 
+const CLAUDE_UPDATE_REASON_KEYS = {
+  active_tasks: 'claudeUpdate.reason.activeTasks',
+  runtime_busy: 'claudeUpdate.reason.runtimeBusy',
+  not_installed: 'claudeUpdate.reason.notInstalled',
+  unsupported_installation: 'claudeUpdate.reason.unsupportedInstallation',
+  identity_changed: 'claudeUpdate.reason.identityChanged',
+  invalid_version: 'claudeUpdate.reason.invalidVersion',
+  permission_denied: 'claudeUpdate.reason.permissionDenied',
+  timed_out: 'claudeUpdate.reason.timedOut',
+  cleanup_unconfirmed: 'claudeUpdate.reason.cleanupUnconfirmed',
+  update_failed: 'claudeUpdate.reason.updateFailed',
+} satisfies Record<Exclude<ClaudeCodeUpdateReason, null>, LocaleKey>;
+
 export function SettingsDialog({
   onClose,
   initialCategory = 'general',
@@ -79,15 +102,32 @@ export function SettingsDialog({
   const [firstRunBusy, setFirstRunBusy] = useState(false);
   const [firstRunError, setFirstRunError] = useState('');
   const [testing, setTesting] = useState(false);
+  const [claudeUpdateState, setClaudeUpdateState] = useState<ClaudeCodeUpdateSnapshot | null>(null);
+  const [claudeUpdateLoading, setClaudeUpdateLoading] = useState(false);
+  const [claudeUpdateBusy, setClaudeUpdateBusy] = useState(false);
+  const [claudeUpdateLoadError, setClaudeUpdateLoadError] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const aboutRequestRef = useRef(0);
+  const mountedRef = useRef(false);
+  const claudeUpdateStateRequestRef = useRef(0);
+  const claudeUpdateOperationRef = useRef(0);
+  const claudeUpdateInFlightRef = useRef(false);
   const currentProject = useWorkspaceStore((state) => state.currentProject);
 
   const {
     setTheme, setLocale: setAppLocale,
     detectedModel, setPermissionMode, setShowDangerousPermissions,
   } = useAppStore();
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      claudeUpdateStateRequestRef.current += 1;
+      claudeUpdateOperationRef.current += 1;
+    };
+  }, []);
 
   // Load settings
   useEffect(() => {
@@ -135,6 +175,45 @@ export function SettingsDialog({
     return () => {
       active = false;
       if (requestId === aboutRequestRef.current) aboutRequestRef.current += 1;
+    };
+  }, [activeCategory]);
+
+  useEffect(() => {
+    if (activeCategory !== 'models') {
+      claudeUpdateStateRequestRef.current += 1;
+      return undefined;
+    }
+
+    if (claudeUpdateInFlightRef.current) {
+      claudeUpdateStateRequestRef.current += 1;
+      setClaudeUpdateLoading(false);
+      setClaudeUpdateLoadError(false);
+      return undefined;
+    }
+
+    const requestId = ++claudeUpdateStateRequestRef.current;
+    setClaudeUpdateState(null);
+    setClaudeUpdateLoading(true);
+    setClaudeUpdateLoadError(false);
+    void window.api.getClaudeCodeUpdateState()
+      .then((snapshot) => {
+        if (mountedRef.current && requestId === claudeUpdateStateRequestRef.current) {
+          setClaudeUpdateState(snapshot);
+        }
+      })
+      .catch(() => {
+        if (mountedRef.current && requestId === claudeUpdateStateRequestRef.current) {
+          setClaudeUpdateLoadError(true);
+        }
+      })
+      .finally(() => {
+        if (mountedRef.current && requestId === claudeUpdateStateRequestRef.current) {
+          setClaudeUpdateLoading(false);
+        }
+      });
+
+    return () => {
+      if (requestId === claudeUpdateStateRequestRef.current) claudeUpdateStateRequestRef.current += 1;
     };
   }, [activeCategory]);
 
@@ -248,6 +327,50 @@ export function SettingsDialog({
       setEnvCheck(env);
     } catch (err) {
       console.error('Failed to refresh:', err);
+    }
+  }, []);
+
+  const handleClaudeCodeUpdate = useCallback(async () => {
+    if (claudeUpdateInFlightRef.current) return;
+    claudeUpdateInFlightRef.current = true;
+    claudeUpdateStateRequestRef.current += 1;
+    const operationId = ++claudeUpdateOperationRef.current;
+    setClaudeUpdateBusy(true);
+    setClaudeUpdateLoading(false);
+    setClaudeUpdateLoadError(false);
+    try {
+      let snapshot: ClaudeCodeUpdateSnapshot;
+      try {
+        snapshot = await window.api.updateClaudeCodeNow();
+      } catch {
+        if (mountedRef.current && operationId === claudeUpdateOperationRef.current) {
+          setClaudeUpdateState({
+            status: 'error',
+            reason: 'update_failed',
+            beforeVersion: null,
+            afterVersion: null,
+          });
+        }
+        return;
+      }
+
+      if (!mountedRef.current || operationId !== claudeUpdateOperationRef.current) return;
+      setClaudeUpdateState(snapshot);
+      if (snapshot.status === 'updated' || snapshot.status === 'up_to_date') {
+        try {
+          const environment = await window.api.checkEnvironment();
+          if (mountedRef.current && operationId === claudeUpdateOperationRef.current) {
+            setEnvCheck(environment);
+          }
+        } catch {
+          return;
+        }
+      }
+    } finally {
+      claudeUpdateInFlightRef.current = false;
+      if (mountedRef.current && operationId === claudeUpdateOperationRef.current) {
+        setClaudeUpdateBusy(false);
+      }
     }
   }, []);
 
@@ -437,6 +560,11 @@ export function SettingsDialog({
                       settings={settings}
                       updateSetting={updateSetting}
                       envCheck={envCheck}
+                      updateState={claudeUpdateState}
+                      updateLoading={claudeUpdateLoading}
+                      updateBusy={claudeUpdateBusy}
+                      updateLoadError={claudeUpdateLoadError}
+                      onUpdate={handleClaudeCodeUpdate}
                     />
                     <ModelConnectionSection
                       settings={settings}
@@ -700,11 +828,49 @@ function GeneralSection({ settings, updateSetting }: {
 // ============================================================
 // Claude Code Section
 // ============================================================
-function ClaudeCodeSection({ settings, updateSetting, envCheck }: {
+function ClaudeCodeSection({
+  settings,
+  updateSetting,
+  envCheck,
+  updateState,
+  updateLoading,
+  updateBusy,
+  updateLoadError,
+  onUpdate,
+}: {
   settings: AppSettings;
   updateSetting: <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => void;
   envCheck: EnvironmentCheckResult | null;
+  updateState: ClaudeCodeUpdateSnapshot | null;
+  updateLoading: boolean;
+  updateBusy: boolean;
+  updateLoadError: boolean;
+  onUpdate: () => void;
 }) {
+  const updateStatus = (() => {
+    if (updateBusy || updateState?.status === 'updating') return t('claudeUpdate.busy');
+    if (updateLoadError) return t('claudeUpdate.loadFailed');
+    if (updateLoading || !updateState) return t('common.loading');
+    if (updateState.reason) return t(CLAUDE_UPDATE_REASON_KEYS[updateState.reason]);
+    if (updateState.status === 'updated') {
+      const versions = updateState.beforeVersion && updateState.afterVersion
+        ? ` ${updateState.beforeVersion} → ${updateState.afterVersion}`
+        : '';
+      return `${t('claudeUpdate.updated')}${versions}`;
+    }
+    if (updateState.status === 'up_to_date') return t('claudeUpdate.upToDate');
+    if (updateState.status === 'idle') return t('claudeUpdate.manualOnly');
+    return t('claudeUpdate.genericError');
+  })();
+  const updateDisabled = updateLoading
+    || updateBusy
+    || updateLoadError
+    || !envCheck?.claude.ok
+    || !updateState
+    || updateState.status === 'updating'
+    || updateState.status === 'unavailable'
+    || updateState.reason === 'cleanup_unconfirmed';
+
   return (
     <div className="space-y-6">
       {/* Claude Code Command */}
@@ -736,6 +902,30 @@ function ClaudeCodeSection({ settings, updateSetting, envCheck }: {
           <label htmlFor="autoDetect" className="text-xs" style={{ color: 'var(--text-secondary)' }}>
             {t('settings.autoDetect')}
           </label>
+        </div>
+        <div className="mt-3 rounded-lg p-3" style={{ backgroundColor: 'var(--bg-tertiary)' }}>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={onUpdate}
+              disabled={updateDisabled}
+              className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs text-white disabled:opacity-50"
+              style={{ backgroundColor: 'var(--accent)' }}
+              data-testid="claude-code-update-now"
+            >
+              <RefreshCw size={13} className={updateBusy ? 'animate-spin' : ''} />
+              {updateBusy ? t('claudeUpdate.busy') : t('claudeUpdate.action')}
+            </button>
+            <p
+              role="status"
+              aria-live="polite"
+              className="min-w-0 text-xs"
+              data-testid="claude-code-update-status"
+              style={{ color: updateState?.reason ? 'var(--error)' : 'var(--text-tertiary)' }}
+            >
+              {updateStatus}
+            </p>
+          </div>
         </div>
       </section>
 

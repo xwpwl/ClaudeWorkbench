@@ -21,6 +21,7 @@ export interface UpdateClient {
 export interface UpdateManagerOptions {
   isPackaged: boolean;
   sourceConfigured: boolean;
+  prepareDownloadCache?: () => string;
 }
 
 const SAFE_VERSION = /^[a-zA-Z0-9._+-]{1,128}$/;
@@ -114,6 +115,7 @@ export class UpdateManager {
     const version = this.snapshot.version;
     this.setState('downloading', version);
     try {
+      this.options.prepareDownloadCache?.();
       await this.client.downloadUpdate();
       return this.setState('downloaded', version);
     } catch {

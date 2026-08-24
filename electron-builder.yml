@@ -1,15 +1,23 @@
 appId: com.claudeworkbench.app
 productName: Claude Workbench
 directories:
-  output: release
-  buildResources: build
+  output: release-validation/staging/build-output
+  buildResources: build-resources
 # Reuse the Electron distribution installed from the lockfile. This keeps
 # Windows packaging deterministic and avoids a second GitHub download during
 # air-gapped or rate-limited release builds.
 electronDist: node_modules/electron/dist
 files:
   - dist/**/*
+  - '!dist/**/*.map'
   - package.json
+extraResources:
+  - from: build-resources/app-icon.png
+    to: app-icon.png
+  - from: release-validation/staging/release-metadata.json
+    to: release-metadata.json
+  - from: build-resources/app-update.yml
+    to: app-update.yml
 asar: true
 asarUnpack:
   # Native SQLite bindings and the Claude SDK executable must remain executable.
@@ -25,21 +33,24 @@ win:
     - target: nsis
       arch:
         - x64
-  icon: build/icon.ico
+  icon: build-resources/app-icon.ico
   requestedExecutionLevel: asInvoker
   # Authenticode is picked up from electron-builder's CSC_LINK/CSC_KEY_PASSWORD
   # environment variables. forceCodeSigning stays false for local unsigned RC
   # validation and must be enabled by the signed release CI job.
   forceCodeSigning: false
 nsis:
+  include: build-resources/installer.nsh
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
-  installerIcon: build/icon.ico
-  uninstallerIcon: build/icon.ico
-  installerHeaderIcon: build/icon.ico
+  installerIcon: build-resources/app-icon.ico
+  uninstallerIcon: build-resources/app-icon.ico
+  # Assisted installers use a bitmap-only header surface; no extra branded
+  # bitmap is introduced. Executable and shortcut icons use the tracked ICO.
   createDesktopShortcut: true
   createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
   shortcutName: Claude Workbench
   artifactName: ClaudeWorkbench Setup ${version}.${ext}
 

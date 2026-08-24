@@ -5,9 +5,21 @@ import path from 'path';
 import { StringDecoder } from 'node:string_decoder';
 import { ClaudeEventParser } from './ClaudeEventParser';
 import {
+  ManagedProcessCleanupUnconfirmedError,
   ProcessSupervisor,
-  type ManagedProcessHandle,
+  type CloseOwnedManagedProcessHandle,
+  type ManagedProcessCleanupCapability,
 } from '../processes/ProcessSupervisor';
+import {
+  mergeClaudeInvocationEnvironment,
+  type ClaudeInvocationResolution,
+  type ClaudeInvocationResolverPort,
+} from './ClaudeInvocationResolver';
+import {
+  ClaudeRuntimeBusyError,
+  type ClaudeRuntimeLease,
+  ClaudeRuntimeMutationGate,
+} from './ClaudeRuntimeMutationGate';
 import type {
   ClaudeAdapter,
   ClaudeEvent,
@@ -34,7 +46,8 @@ export interface PermissionBrokerPort {
 }
 
 export interface AdapterOptions {
-  executable?: string;
+  invocationResolver: ClaudeInvocationResolverPort;
+  runtimeGate: ClaudeRuntimeMutationGate;
   permissionBroker?: PermissionBrokerPort;
   permissionMcpPath?: string;
   spawnProcess?: typeof spawn;
@@ -62,7 +75,13 @@ interface ActiveRun {
   stderrTail: string;
   stderrBuffer: string;
   stderrDecoder: StringDecoder;
-  managedProcess: ManagedProcessHandle;
+  managedProcess: CloseOwnedManagedProcessHandle;
+  runtimeLease: ClaudeRuntimeLease;
+}
+
+interface PendingRuntimeCleanup {
+  cleanup: ManagedProcessCleanupCapability;
+  runtimeLease: ClaudeRuntimeLease;
 }
 
 function stableTaskId(options: ClaudeRunOptions): string {
@@ -222,7 +241,8 @@ export async function selectStartupClaudeAdapter(
 }
 
 export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
-  private readonly executable: string;
+  private readonly invocationResolver: ClaudeInvocationResolverPort;
+  private readonly runtimeGate: ClaudeRuntimeMutationGate;
   private readonly spawnProcess: typeof spawn;
   private readonly permissionBroker?: PermissionBrokerPort;
   private readonly permissionMcpPath?: string;
@@ -231,10 +251,12 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
   private readonly terminationForceMs: number;
   private readonly providerEnvironment?: ProviderEnvironmentPort;
   private readonly activeRuns = new Map<string, ActiveRun>();
+  private readonly pendingRuntimeCleanups = new Set<PendingRuntimeCleanup>();
 
-  constructor(options: AdapterOptions = {}) {
+  constructor(options: AdapterOptions) {
     super();
-    this.executable = options.executable || 'claude';
+    this.invocationResolver = options.invocationResolver;
+    this.runtimeGate = options.runtimeGate;
     this.spawnProcess = options.spawnProcess || spawn;
     this.permissionBroker = options.permissionBroker;
     this.permissionMcpPath = options.permissionMcpPath;
@@ -249,14 +271,42 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
   }
 
   async checkInstallation(): Promise<ClaudeInstallationInfo> {
-    return new Promise((resolve) => {
-      let stdout = '';
-      let settled = false;
-      const child = this.spawnProcess(this.executable, ['--version'], {
+    const runtimeLease = this.runtimeGate.tryAcquireOrdinary();
+    if (!runtimeLease) {
+      return { installed: false, path: null, version: null };
+    }
+
+    let resolution: ClaudeInvocationResolution;
+    try {
+      resolution = this.invocationResolver.resolve();
+    } catch {
+      runtimeLease.release();
+      return { installed: false, path: null, version: null };
+    }
+    if (!resolution.ok) {
+      runtimeLease.release();
+      return { installed: false, path: null, version: null };
+    }
+    const { invocation } = resolution;
+    let child: ChildProcess;
+    try {
+      child = this.spawnProcess(invocation.executable, [
+        ...invocation.prefixArgs,
+        '--version',
+      ], {
         shell: false,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
+        env: mergeClaudeInvocationEnvironment(process.env, invocation),
       });
+    } catch {
+      runtimeLease.release();
+      return { installed: false, path: null, version: null };
+    }
+
+    return new Promise((resolve) => {
+      let stdout = '';
+      let settled = false;
       const finish = (result: ClaudeInstallationInfo) => {
         if (settled) return;
         settled = true;
@@ -264,85 +314,107 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
       };
       child.stdout?.on('data', (chunk) => { stdout += chunk.toString(); });
       child.once('error', () => finish({ installed: false, path: null, version: null }));
-      child.once('close', (code) => finish({
-        installed: code === 0,
-        path: code === 0 ? this.executable : null,
-        version: code === 0 ? stdout.trim() || null : null,
-      }));
+      child.once('close', (code) => {
+        try {
+          finish({
+            installed: code === 0,
+            path: code === 0 ? invocation.displayPath : null,
+            version: code === 0 ? stdout.trim() || null : null,
+          });
+        } finally {
+          runtimeLease.release();
+        }
+      });
     });
   }
 
   async runPrompt(options: ClaudeRunOptions): Promise<ClaudeRunDescriptor> {
-    if (this.activeRuns.has(options.runId)) throw new Error('Duplicate run id');
-    const cwd = path.resolve(options.projectPath);
-    let projectDirectoryAvailable = false;
-    try {
-      projectDirectoryAvailable = fs.statSync(cwd).isDirectory();
-    } catch {
-      projectDirectoryAvailable = false;
-    }
-    if (!projectDirectoryAvailable) {
-      throw new Error('Project directory is not available.');
-    }
+    const runtimeLease = this.runtimeGate.tryAcquireOrdinary();
+    if (!runtimeLease) throw new ClaudeRuntimeBusyError();
 
-    let permission: PermissionLaunch | undefined;
-    let childEnv: NodeJS.ProcessEnv = { ...process.env };
-    if (options.modelProviderId) {
-      if (!this.providerEnvironment) {
-        throw new Error('Provider environment resolver is unavailable.');
+    let cwd: string;
+    let secretPatterns: string[];
+    let args: string[];
+    let parser: ClaudeEventParser;
+    let managedProcess: CloseOwnedManagedProcessHandle;
+    try {
+      if (this.activeRuns.has(options.runId)) throw new Error('Duplicate run id');
+      cwd = path.resolve(options.projectPath);
+      let projectDirectoryAvailable = false;
+      try {
+        projectDirectoryAvailable = fs.statSync(cwd).isDirectory();
+      } catch {
+        projectDirectoryAvailable = false;
       }
-      childEnv = {
-        ...this.providerEnvironment.resolveChildEnvironment(options, childEnv),
-      };
-    }
-    if (this.permissionBroker && this.permissionMcpPath) {
-      const identity = trustedPermissionIdentity(options);
-      this.permissionBroker.registerRun({
-        runId: options.runId,
-        sessionKey: options.sessionKey,
-        projectPath: cwd,
-        ...identity,
-      });
-      const brokerEnvironment = this.permissionBroker.getMcpEnvironment(options.runId);
-      childEnv = {
-        ...childEnv,
-        CLAUDE_WORKBENCH_PERMISSION_ENDPOINT: brokerEnvironment.endpoint,
-        CLAUDE_WORKBENCH_PERMISSION_TOKEN: brokerEnvironment.token,
-        CLAUDE_WORKBENCH_PERMISSION_RUN_ID: brokerEnvironment.runId,
-      };
-      permission = {
-        mcpConfigJson: JSON.stringify({
-          mcpServers: {
-            workbench_permissions: {
-              type: 'stdio',
-              command: process.execPath,
-              args: [this.permissionMcpPath],
-              env: { ELECTRON_RUN_AS_NODE: '1' },
+      if (!projectDirectoryAvailable) {
+        throw new Error('Project directory is not available.');
+      }
+
+      let permission: PermissionLaunch | undefined;
+      let childEnv: NodeJS.ProcessEnv = { ...process.env };
+      if (options.modelProviderId) {
+        if (!this.providerEnvironment) {
+          throw new Error('Provider environment resolver is unavailable.');
+        }
+        childEnv = {
+          ...this.providerEnvironment.resolveChildEnvironment(options, childEnv),
+        };
+      }
+      if (this.permissionBroker && this.permissionMcpPath) {
+        const identity = trustedPermissionIdentity(options);
+        this.permissionBroker.registerRun({
+          runId: options.runId,
+          sessionKey: options.sessionKey,
+          projectPath: cwd,
+          ...identity,
+        });
+        const brokerEnvironment = this.permissionBroker.getMcpEnvironment(options.runId);
+        childEnv = {
+          ...childEnv,
+          CLAUDE_WORKBENCH_PERMISSION_ENDPOINT: brokerEnvironment.endpoint,
+          CLAUDE_WORKBENCH_PERMISSION_TOKEN: brokerEnvironment.token,
+          CLAUDE_WORKBENCH_PERMISSION_RUN_ID: brokerEnvironment.runId,
+        };
+        permission = {
+          mcpConfigJson: JSON.stringify({
+            mcpServers: {
+              workbench_permissions: {
+                type: 'stdio',
+                command: process.execPath,
+                args: [this.permissionMcpPath],
+                env: { ELECTRON_RUN_AS_NODE: '1' },
+              },
             },
-          },
-        }),
-        promptToolName: 'mcp__workbench_permissions__request_permission',
+          }),
+          promptToolName: 'mcp__workbench_permissions__request_permission',
+        };
+      }
+
+      const resolution = this.invocationResolver.resolve();
+      if (!resolution.ok) throw new Error('Claude Code is unavailable.');
+      childEnv = {
+        ...mergeClaudeInvocationEnvironment(childEnv, resolution.invocation),
       };
-    }
+      secretPatterns = childSecretPatterns(childEnv);
+      args = [
+        ...resolution.invocation.prefixArgs,
+        ...buildClaudeArgs(options, permission),
+      ];
+      console.info('[ClaudeCliAdapter] starting', {
+        runId: options.runId,
+        permissionMode: options.permissionMode ?? 'default',
+      });
 
-    const secretPatterns = childSecretPatterns(childEnv);
-    const args = buildClaudeArgs(options, permission);
-    console.info('[ClaudeCliAdapter] starting', {
-      runId: options.runId,
-      permissionMode: options.permissionMode ?? 'default',
-    });
-
-    const parser = new ClaudeEventParser();
-    let managedProcess: ManagedProcessHandle;
-    try {
+      parser = new ClaudeEventParser();
       managedProcess = await this.processSupervisor.spawn({
         id: options.runId,
         kind: 'claude',
-        command: this.executable,
+        command: resolution.invocation.executable,
         args,
         sessionId: stableTaskId(options),
         taskId: stableTaskId(options),
         runId: options.runId,
+        confirmCloseOwnership: true,
         options: {
           cwd,
           env: childEnv,
@@ -353,11 +425,20 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
         },
       });
     } catch (error) {
-      this.permissionBroker?.cancelRun(options.runId, 'spawn failed');
+      try {
+        this.permissionBroker?.cancelRun(options.runId, 'spawn failed');
+      } catch {
+        // Preserve the original launch failure while retaining cleanup ownership.
+      } finally {
+        if (error instanceof ManagedProcessCleanupUnconfirmedError) {
+          this.pendingRuntimeCleanups.add({ cleanup: error.cleanup, runtimeLease });
+        } else {
+          runtimeLease.release();
+        }
+      }
       throw error;
     }
     const child: ChildProcess = managedProcess.child;
-    this.permissionBroker?.bindProcess(options.runId, child.pid ?? null);
 
     const active: ActiveRun = {
       options,
@@ -371,6 +452,7 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
       stderrBuffer: '',
       stderrDecoder: new StringDecoder('utf8'),
       managedProcess,
+      runtimeLease,
     };
     this.activeRuns.set(options.runId, active);
 
@@ -435,32 +517,87 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
         });
       }
     });
-    child.once('close', (code, signal) => {
-      parser.flush();
-      flushStderr();
-      if (!active.stopped && !active.terminalEmitted) {
-        active.terminalEmitted = true;
-        if (code === 0) {
-          emitSafe({
-            type: 'session_completed',
-            sessionId: active.claudeSessionId,
-            duration: Date.now() - active.startedAt,
-            timestamp: Date.now(),
-          });
-        } else {
-          const detail = active.stderrTail.trim().split(/\r?\n/).slice(-2).join(' ').slice(0, 500);
-          emitSafe({
-            type: 'session_failed',
-            sessionId: active.claudeSessionId || undefined,
-            error: detail || `Claude Code 退出（code=${code ?? 'null'}, signal=${signal ?? 'none'}）`,
-            duration: Date.now() - active.startedAt,
-            timestamp: Date.now(),
-          });
+    let finalized = false;
+    const finalizeRun = (
+      code: number | null,
+      signal: string | null,
+      processError?: string,
+    ): void => {
+      if (finalized) return;
+      finalized = true;
+      try {
+        parser.flush();
+        flushStderr();
+        if (!active.stopped && !active.terminalEmitted) {
+          active.terminalEmitted = true;
+          if (processError) {
+            emitSafe({
+              type: 'session_failed',
+              sessionId: active.claudeSessionId || undefined,
+              error: `无法启动 Claude Code：${processError}`,
+              duration: Date.now() - active.startedAt,
+              timestamp: Date.now(),
+            });
+          } else if (code === 0) {
+            emitSafe({
+              type: 'session_completed',
+              sessionId: active.claudeSessionId,
+              duration: Date.now() - active.startedAt,
+              timestamp: Date.now(),
+            });
+          } else {
+            const detail = active.stderrTail.trim().split(/\r?\n/).slice(-2).join(' ').slice(0, 500);
+            emitSafe({
+              type: 'session_failed',
+              sessionId: active.claudeSessionId || undefined,
+              error: detail || `Claude Code 退出（code=${code ?? 'null'}, signal=${signal ?? 'none'}）`,
+              duration: Date.now() - active.startedAt,
+              timestamp: Date.now(),
+            });
+          }
+        }
+      } finally {
+        this.activeRuns.delete(options.runId);
+        try {
+          this.permissionBroker?.completeRun(options.runId);
+        } finally {
+          active.runtimeLease.release();
         }
       }
-      this.activeRuns.delete(options.runId);
-      this.permissionBroker?.completeRun(options.runId);
-    });
+    };
+    let supervisedError: string | undefined;
+    void managedProcess.waitForExit().then(
+      (exit) => { supervisedError = exit.error; },
+      () => { supervisedError = 'process supervision failed'; },
+    ).catch(() => undefined);
+    void managedProcess.waitForClose().then(
+      (close) => finalizeRun(close.exitCode, close.signal, supervisedError),
+    ).catch(() => undefined);
+
+    try {
+      this.permissionBroker?.bindProcess(options.runId, child.pid ?? null);
+    } catch (bindError) {
+      active.stopped = true;
+      try {
+        this.permissionBroker?.cancelRun(options.runId, 'process bind failed');
+      } catch {
+        // Process ownership and lease cleanup still take priority.
+      }
+      try {
+        const exit = await managedProcess.terminate({
+          graceMs: this.terminationGraceMs,
+          forceMs: this.terminationForceMs,
+        });
+        const close = await managedProcess.waitForClose();
+        finalizeRun(close.exitCode, close.signal, exit.error);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [bindError, cleanupError],
+          'Claude process binding failed and cleanup could not be confirmed.',
+        );
+      }
+      throw bindError;
+    }
 
     emitSafe({
       type: 'session_started',
@@ -480,6 +617,7 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
         graceMs: this.terminationGraceMs,
         forceMs: this.terminationForceMs,
       });
+      await active.managedProcess.waitForClose();
     } catch (error) {
       // Keep a later child close observable so TaskManager can still release
       // its session and mutation locks after a termination failure.
@@ -490,7 +628,14 @@ export class ClaudeCliAdapter extends EventEmitter implements ClaudeAdapter {
   }
 
   async stopAll(): Promise<void> {
-    await Promise.all([...this.activeRuns.keys()].map((runId) => this.stopRun(runId)));
+    await Promise.all([
+      ...[...this.activeRuns.keys()].map((runId) => this.stopRun(runId)),
+      ...[...this.pendingRuntimeCleanups].map(async (pending) => {
+        await pending.cleanup.retryCleanup({ forceMs: this.terminationForceMs });
+        this.pendingRuntimeCleanups.delete(pending);
+        pending.runtimeLease.release();
+      }),
+    ]);
   }
 
   subscribe(listener: (envelope: ClaudeEventEnvelope) => void): () => void {

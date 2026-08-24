@@ -2,6 +2,8 @@ import { randomUUID } from 'node:crypto';
 import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 
 export type ManagedProcessKind = 'claude' | 'mcp' | 'terminal';
+export type ManagedProcessSettlement = 'error-or-close' | 'close-only';
+export type ManagedProcessJournalError = 'raw' | 'redacted';
 
 export interface ManagedProcessRequest {
   id?: string;
@@ -12,6 +14,15 @@ export interface ManagedProcessRequest {
   sessionId?: string;
   taskId?: string;
   runId?: string;
+  settlement?: ManagedProcessSettlement;
+  closeTimeoutMs?: number;
+  journalError?: ManagedProcessJournalError;
+  confirmCloseOwnership?: true;
+}
+
+export interface ManagedProcessCloseReceipt {
+  readonly exitCode: number | null;
+  readonly signal: string | null;
 }
 
 export interface ProcessStartRecord {
@@ -53,6 +64,38 @@ export interface ProcessTerminationOptions {
   forceMs?: number;
 }
 
+export interface ManagedProcessCleanupCapability {
+  retryCleanup(options?: ProcessTerminationOptions): Promise<void>;
+}
+
+export type ManagedProcessLaunchFailureReason =
+  | 'permission_denied'
+  | 'launch_failed';
+
+export class ManagedProcessLaunchError extends Error {
+  readonly reason: ManagedProcessLaunchFailureReason;
+
+  constructor(reason: ManagedProcessLaunchFailureReason) {
+    super('Managed process launch failed.');
+    Object.defineProperty(this, 'name', {
+      value: 'ManagedProcessLaunchError',
+      configurable: true,
+    });
+    this.reason = reason;
+  }
+}
+
+export class ManagedProcessCleanupUnconfirmedError extends Error {
+  readonly code = 'MANAGED_PROCESS_CLEANUP_UNCONFIRMED';
+  readonly cleanup: ManagedProcessCleanupCapability;
+
+  constructor(cleanup: ManagedProcessCleanupCapability) {
+    super('Managed process cleanup could not be confirmed.');
+    this.name = 'ManagedProcessCleanupUnconfirmedError';
+    this.cleanup = cleanup;
+  }
+}
+
 export interface ManagedProcessHandle {
   readonly id: string;
   readonly pid: number;
@@ -60,6 +103,10 @@ export interface ManagedProcessHandle {
   readonly startedAt: string;
   waitForExit(): Promise<ProcessExitRecord>;
   terminate(options?: ProcessTerminationOptions): Promise<ProcessExitRecord>;
+}
+
+export interface CloseOwnedManagedProcessHandle extends ManagedProcessHandle {
+  waitForClose(): Promise<ManagedProcessCloseReceipt>;
 }
 
 export interface ProcessSupervisorOptions {
@@ -86,12 +133,24 @@ interface ActiveProcess {
   rejectExit: (error: unknown) => void;
   terminal: ProcessExitRecord | null;
   startJournal: Promise<void>;
+  pendingError: unknown | undefined;
+  settlement: ManagedProcessSettlement;
+  journalError: ManagedProcessJournalError;
+  closeOwnership?: RawCloseConfirmation;
+}
+
+interface RawCloseConfirmation {
+  isClosed(): boolean;
+  wait(timeoutMs: number): Promise<boolean>;
+  waitForClose(): Promise<ManagedProcessCloseReceipt>;
+  launchFailureReason(): ManagedProcessLaunchFailureReason;
 }
 
 const NULL_JOURNAL: ProcessJournalStore = {
   recordStarted: () => undefined,
   recordExited: () => undefined,
 };
+const REDACTED_JOURNAL_ERROR = 'managed-process-error';
 
 function boundedDelay(value: number | undefined, fallback: number): number {
   if (value === undefined) return fallback;
@@ -108,6 +167,58 @@ function wait(ms: number): Promise<'timeout'> {
     const timer = setTimeout(() => resolve('timeout'), ms);
     timer.unref?.();
   });
+}
+
+function observeRawClose(child: ChildProcess, observeError: boolean): RawCloseConfirmation {
+  let closed = false;
+  let resolveClose!: (receipt: ManagedProcessCloseReceipt) => void;
+  const close = new Promise<ManagedProcessCloseReceipt>((resolve) => {
+    resolveClose = resolve;
+  });
+  let launchFailureReason: ManagedProcessLaunchFailureReason = 'launch_failed';
+  const waiters = new Set<(confirmed: boolean) => void>();
+  const onError = (error: unknown): void => {
+    if (
+      typeof error === 'object'
+      && error !== null
+      && 'code' in error
+      && ((error as { code?: unknown }).code === 'EACCES'
+        || (error as { code?: unknown }).code === 'EPERM')
+    ) {
+      launchFailureReason = 'permission_denied';
+    }
+  };
+  const onClose = (exitCode: number | null, signal: NodeJS.Signals | null): void => {
+    closed = true;
+    child.removeListener('close', onClose);
+    if (observeError) child.removeListener('error', onError);
+    resolveClose(Object.freeze({ exitCode, signal }));
+    for (const finish of waiters) finish(true);
+    waiters.clear();
+  };
+  child.once('close', onClose);
+  if (observeError) child.on('error', onError);
+
+  return {
+    isClosed: () => closed,
+    launchFailureReason: () => launchFailureReason,
+    waitForClose: () => close,
+    wait: (timeoutMs) => {
+      if (closed) return Promise.resolve(true);
+      return new Promise((resolve) => {
+        let timer: ReturnType<typeof setTimeout>;
+        const finish = (confirmed: boolean): void => {
+          waiters.delete(finish);
+          clearTimeout(timer);
+          resolve(confirmed);
+        };
+        waiters.add(finish);
+        timer = setTimeout(() => finish(false), timeoutMs);
+        timer.unref?.();
+        if (closed) finish(true);
+      });
+    },
+  };
 }
 
 /**
@@ -143,6 +254,10 @@ export class ProcessSupervisor {
     ));
   }
 
+  async spawn(
+    request: ManagedProcessRequest & { readonly confirmCloseOwnership: true },
+  ): Promise<CloseOwnedManagedProcessHandle>;
+  async spawn(request: ManagedProcessRequest): Promise<ManagedProcessHandle>;
   async spawn(request: ManagedProcessRequest): Promise<ManagedProcessHandle> {
     const id = request.id?.trim() || this.randomId();
     if (!id || id.length > 512 || id.includes('\0')) throw new Error('Invalid managed process id.');
@@ -151,15 +266,28 @@ export class ProcessSupervisor {
       throw new Error('Managed process command is invalid.');
     }
 
+    const settlement = request.settlement ?? 'error-or-close';
+    const closeTimeoutMs = boundedDelay(request.closeTimeoutMs, 5_000);
     const child = this.spawnProcess(request.command, [...(request.args ?? [])], {
       ...request.options,
       shell: false,
     });
+    const rawClose = settlement === 'close-only' || request.confirmCloseOwnership === true
+      ? observeRawClose(child, !child.pid || request.confirmCloseOwnership === true)
+      : undefined;
     if (!child.pid) {
       // Node reports asynchronous spawn failures through `error`; keep that
       // event observed even though the missing PID already fails this launch.
-      child.once('error', () => undefined);
+      if (!rawClose) child.once('error', () => undefined);
       child.kill('SIGKILL');
+      if (rawClose && !await rawClose.wait(closeTimeoutMs)) {
+        throw new ManagedProcessCleanupUnconfirmedError(
+          this.cleanupCapability(child, rawClose, closeTimeoutMs),
+        );
+      }
+      if (rawClose) {
+        throw new ManagedProcessLaunchError(rawClose.launchFailureReason());
+      }
       throw new Error('Managed process did not provide a PID.');
     }
 
@@ -189,21 +317,49 @@ export class ProcessSupervisor {
       rejectExit,
       terminal: null,
       startJournal: Promise.resolve(),
+      pendingError: undefined,
+      settlement,
+      journalError: request.journalError ?? 'raw',
+      ...(request.confirmCloseOwnership === true ? { closeOwnership: rawClose } : {}),
     };
-    active.startJournal = Promise.resolve(this.journal.recordStarted({ ...start }));
     this.active.set(id, active);
 
     const finalize = (exitCode: number | null, signal: string | null, error?: unknown): void => {
+      child.removeListener('close', onClose);
+      child.removeListener('error', onError);
       void this.finalize(active, exitCode, signal, error);
     };
-    child.once('close', (code, signal) => finalize(code, signal));
-    child.once('error', (error) => finalize(null, null, error));
+    const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
+      finalize(code, signal, active.pendingError);
+    };
+    const onError = (error: Error): void => {
+      if (active.settlement === 'close-only') {
+        active.pendingError ??= error;
+        return;
+      }
+      finalize(null, null, error);
+    };
+    child.once('close', onClose);
+    if (settlement === 'close-only') child.on('error', onError);
+    else child.once('error', onError);
 
+    let startJournalAssigned = false;
     try {
+      active.startJournal = Promise.resolve(this.journal.recordStarted({ ...start }));
+      startJournalAssigned = true;
       await active.startJournal;
     } catch (error) {
+      if (!startJournalAssigned) {
+        active.startJournal = Promise.reject(error);
+        void active.startJournal.catch(() => undefined);
+      }
       this.active.delete(id);
       child.kill('SIGKILL');
+      if (rawClose && !await rawClose.wait(closeTimeoutMs)) {
+        throw new ManagedProcessCleanupUnconfirmedError(
+          this.cleanupCapability(child, rawClose, closeTimeoutMs),
+        );
+      }
       throw new Error(`Managed process journal rejected launch: ${errorMessage(error)}`);
     }
 
@@ -224,11 +380,28 @@ export class ProcessSupervisor {
     active: ActiveProcess,
     options: ProcessTerminationOptions,
   ): Promise<ProcessExitRecord> {
-    if (active.terminal) return active.terminal;
+    if (active.terminal && (!active.closeOwnership || active.closeOwnership.isClosed())) {
+      return active.terminal;
+    }
 
     const graceMs = boundedDelay(options.graceMs, this.defaultGraceMs);
     const forceMs = boundedDelay(options.forceMs, this.defaultForceMs);
     const signalled = active.child.kill('SIGTERM');
+    if (active.closeOwnership) {
+      if (await active.closeOwnership.wait(graceMs)) return active.exit;
+      if (!signalled) {
+        throw new Error(`Managed process could not be signalled safely: ${active.start.id}`);
+      }
+      if (this.platform === 'win32') {
+        await this.taskkill(active.start.pid, true, forceMs);
+      } else {
+        active.child.kill('SIGKILL');
+      }
+      if (!await active.closeOwnership.wait(forceMs)) {
+        throw new Error(`Managed process did not exit after force termination: ${active.start.id}`);
+      }
+      return active.exit;
+    }
     const graceful = await Promise.race([active.exit, wait(graceMs)]);
     if (graceful !== 'timeout') return graceful;
     if (!signalled) {
@@ -301,7 +474,36 @@ export class ProcessSupervisor {
       startedAt: active.start.startedAt,
       waitForExit: () => active.exit,
       terminate: (options: ProcessTerminationOptions = {}) => this.terminateActive(active, options),
+      ...(active.closeOwnership
+        ? { waitForClose: () => active.closeOwnership!.waitForClose() }
+        : {}),
     });
+  }
+
+  private cleanupCapability(
+    child: ChildProcess,
+    rawClose: RawCloseConfirmation,
+    closeTimeoutMs: number,
+  ): ManagedProcessCleanupCapability {
+    let inFlight: Promise<void> | null = null;
+    const retryCleanup = (options: ProcessTerminationOptions = {}): Promise<void> => {
+      if (rawClose.isClosed()) return Promise.resolve();
+      if (inFlight) return inFlight;
+      const attempt = (async () => {
+        child.kill('SIGKILL');
+        const timeoutMs = boundedDelay(options.forceMs, closeTimeoutMs);
+        if (!await rawClose.wait(timeoutMs)) {
+          throw new Error('Managed process cleanup could not be confirmed.');
+        }
+      })();
+      inFlight = attempt;
+      void attempt.then(
+        () => { if (inFlight === attempt) inFlight = null; },
+        () => { if (inFlight === attempt) inFlight = null; },
+      );
+      return attempt;
+    };
+    return Object.freeze({ retryCleanup });
   }
 
   private async finalize(
@@ -324,7 +526,10 @@ export class ProcessSupervisor {
     if (this.active.get(active.start.id) === active) this.active.delete(active.start.id);
     try {
       await active.startJournal;
-      await this.journal.recordExited({ ...record });
+      const journalRecord = active.journalError === 'redacted' && record.error !== undefined
+        ? { ...record, error: REDACTED_JOURNAL_ERROR }
+        : { ...record };
+      await this.journal.recordExited(journalRecord);
       active.resolveExit(record);
     } catch (journalError) {
       active.rejectExit(journalError);

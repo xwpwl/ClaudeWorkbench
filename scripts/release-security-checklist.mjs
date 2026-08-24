@@ -1,105 +1,87 @@
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { writeAtomicJson } from './release/lib/common.mjs';
+import {
+  assertSecurityChecklistResults,
+  runSecurityChecklist,
+} from './release/lib/security-checklist.mjs';
 
-const scriptDirectory = path.dirname(fileURLToPath(import.meta.url));
-const workspace = path.resolve(scriptDirectory, '..');
-const requestedReport = process.argv.indexOf('--report');
-const reportPath = requestedReport >= 0 && process.argv[requestedReport + 1]
-  ? path.resolve(process.argv[requestedReport + 1])
-  : path.join(workspace, 'release-validation', 'security-checklist.json');
+const REPORT_PATH = 'release-validation/reports/security-checklist-diagnostic.json';
+const ARGUMENT_ERROR = 'Release security checklist accepts no arguments.';
 
-function read(relativePath) {
-  return fs.readFileSync(path.join(workspace, relativePath), 'utf8');
+function samePath(left, right) {
+  const normalize = (value) => path.resolve(value).replace(/[\\/]+$/u, '').toLowerCase();
+  return normalize(left) === normalize(right);
 }
 
-function productionSources(directory) {
-  const root = path.join(workspace, directory);
-  const result = [];
-  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-    if (entry.name === '__tests__') continue;
-    const absolute = path.join(root, entry.name);
-    if (entry.isDirectory()) result.push(...productionSources(path.relative(workspace, absolute)));
-    else if (/\.tsx?$/u.test(entry.name)) result.push(fs.readFileSync(absolute, 'utf8'));
+function assertOrdinaryDirectory(directory, label) {
+  const stat = fs.lstatSync(directory);
+  if (!stat.isDirectory() || stat.isSymbolicLink()
+    || !samePath(fs.realpathSync.native(directory), directory)) {
+    throw new Error(`${label} must be an ordinary directory.`);
   }
-  return result;
 }
 
-const mainSource = read('src/main/index.ts');
-const singleInstanceSource = read('src/main/lifecycle/SingleInstanceGuard.ts');
-const settingsSource = read('src/main/ipc/settings.ts');
-const builderConfig = read('electron-builder.yml');
-const gitMutationSource = [
-  ...productionSources('src/main/checkpoints'),
-  ...productionSources('src/main/file-changes'),
-].join('\n');
-
-const staticChecks = [
-  ['bypassPermissions defaults off', /defaultPermissionMode:\s*'standard'/u.test(settingsSource)],
-  ['renderer Node integration disabled', /nodeIntegration:\s*false/u.test(mainSource)],
-  ['renderer context isolation enabled', /contextIsolation:\s*true/u.test(mainSource)],
-  ['renderer sandbox enabled', /sandbox:\s*true/u.test(mainSource)],
-  ['single-instance lock enabled', /installSingleInstanceGuard/u.test(mainSource)
-    && /requestSingleInstanceLock/u.test(singleInstanceSource)],
-  ['NSIS runs as current user', /requestedExecutionLevel:\s*asInvoker/u.test(builderConfig)],
-  ['code-signing hook prepared', /CSC_LINK\/CSC_KEY_PASSWORD/u.test(builderConfig)],
-  ['dangerous Git mutations absent', !/(?:reset.{0,40}--hard|clean.{0,40}(?:-f|--force)|push.{0,40}--force)/isu.test(gitMutationSource)],
-].map(([name, passed]) => ({ name, passed: Boolean(passed) }));
-
-const focusedTests = [
-  'src/main/tasks/__tests__/TaskManager.test.ts',
-  'src/main/permissions/__tests__/PermissionBroker.test.ts',
-  'src/main/permissions/__tests__/PermissionAudit.test.ts',
-  'src/main/ipc/__tests__/claude.test.ts',
-  'src/main/ipc/__tests__/permissions.test.ts',
-  'src/main/ipc/__tests__/system.test.ts',
-  'src/main/ipc/__tests__/file-changes.test.ts',
-  'src/main/ipc/__tests__/git-workspace.test.ts',
-  'src/main/file-mutations/__tests__/FileMutationManager.test.ts',
-  'src/main/logging/__tests__/StructuredLogger.test.ts',
-  'src/main/diagnostics/__tests__/DiagnosticsExporter.test.ts',
-  'src/main/ipc/__tests__/diagnostics.test.ts',
-  'src/main/release/__tests__/InstallerConfig.test.ts',
-];
-
-const vitest = path.join(workspace, 'node_modules', 'vitest', 'vitest.mjs');
-const testRun = spawnSync(process.execPath, [vitest, 'run', ...focusedTests, '--reporter=json'], {
-  cwd: workspace,
-  encoding: 'utf8',
-  maxBuffer: 32 * 1024 * 1024,
-  windowsHide: true,
-});
-
-let testSummary = { passed: false, testCount: 0, failedCount: 0 };
-try {
-  const parsed = JSON.parse(testRun.stdout || '{}');
-  testSummary = {
-    passed: testRun.status === 0 && Boolean(parsed.success),
-    testCount: Number(parsed.numTotalTests || 0),
-    failedCount: Number(parsed.numFailedTests || 0),
-  };
-} catch {
-  testSummary = { passed: false, testCount: 0, failedCount: 1 };
+export function ensureFixedReportDirectory(workspaceRoot) {
+  assertOrdinaryDirectory(workspaceRoot, 'Release workspace');
+  let current = workspaceRoot;
+  for (const segment of ['release-validation', 'reports']) {
+    current = path.join(current, segment);
+    try {
+      assertOrdinaryDirectory(current, 'Security diagnostic report directory');
+    } catch (error) {
+      if (!error || error.code !== 'ENOENT') throw error;
+      fs.mkdirSync(current, { recursive: false, mode: 0o700 });
+      assertOrdinaryDirectory(current, 'Security diagnostic report directory');
+    }
+  }
 }
 
-const report = {
-  generatedAt: new Date().toISOString(),
-  version: JSON.parse(read('package.json')).version,
-  staticChecks,
-  focusedTests: testSummary,
-  runtimeEvidenceRequired: [
-    'production Electron security acceptance',
-    'diagnostic ZIP sentinel scan',
-    'Authenticode status of the final installer',
-  ],
-  passed: staticChecks.every((check) => check.passed) && testSummary.passed,
-};
+function workspaceRoot() {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+}
 
-fs.mkdirSync(path.dirname(reportPath), { recursive: true });
-fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8');
-console.log(JSON.stringify(report, null, 2));
-if (!report.passed) {
-  if (testRun.stderr) console.error(testRun.stderr.slice(0, 4_000));
-  process.exitCode = 1;
+export async function runDiagnosticCli({
+  argv = process.argv.slice(2),
+  deps = {},
+} = {}) {
+  if (!Array.isArray(argv) || argv.length !== 0) throw new Error(ARGUMENT_ERROR);
+
+  const root = workspaceRoot();
+  const runChecklist = deps.runSecurityChecklist ?? runSecurityChecklist;
+  const validateResults = deps.assertSecurityChecklistResults ?? assertSecurityChecklistResults;
+  const ensureDirectory = deps.ensureFixedReportDirectory ?? ensureFixedReportDirectory;
+  const writeReport = deps.writeAtomicJson ?? writeAtomicJson;
+  const results = validateResults(await runChecklist({ workspaceRoot: root, deps: deps.checklist }));
+  const report = Object.freeze({
+    schemaVersion: 1,
+    kind: 'security-checklist-diagnostic',
+    authoritative: false,
+    results,
+  });
+  ensureDirectory(root);
+  const reportPath = writeReport(root, REPORT_PATH, report);
+  return Object.freeze({
+    exitCode: results.every((item) => item.status === 'PASS') ? 0 : 1,
+    reportPath,
+    report,
+  });
+}
+
+function isDirectExecution() {
+  return Boolean(process.argv[1]
+    && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url));
+}
+
+if (isDirectExecution()) {
+  runDiagnosticCli().then((result) => {
+    process.stdout.write(`${JSON.stringify(result.report, null, 2)}\n`);
+    process.exitCode = result.exitCode;
+  }).catch((error) => {
+    process.stderr.write(error?.message === ARGUMENT_ERROR
+      ? `${ARGUMENT_ERROR}\n`
+      : 'Release security checklist failed.\n');
+    process.exitCode = 1;
+  });
 }
